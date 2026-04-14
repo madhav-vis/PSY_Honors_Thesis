@@ -1,0 +1,36 @@
+run_name: "sj04_walk_pilot"
+date: "auto"
+data:
+  root: "data"
+  subjects: [4]
+
+eeg:
+  reference_channels: ["TP9", "TP10"]
+  sfreq_target: 250
+  filter_low: 0.1
+  filter_high: 30.0
+  bad_channel_z_thresh: 3.5
+  trigger_latency_offset: 60
+  tmin: -0.2
+  tmax: 1.0
+  baseline: [-0.2, 0]
+
+conditions:
+  - eeg_label: "walk_attend"
+    trial_label: "Attend_Walk"
+  - eeg_label: "walk_unattend"
+    trial_label: "Unattend_Walk"
+
+et:
+  folder_map:
+    walk_attend: "Attend_Walk"
+    walk_unattend: "Unattend_Walk"
+    sit_attend: "Attend_Sit"
+    sit_unattend: "Unattend_Sit"
+
+erp:
+  target_channels: ["Pz", "C3", "Cz", "C4", "CP1", "CP2", "P3", "P4", "O1", "Oz", "O2"]
+  codes: [1, 2, 3]
+
+features:
+  p300_window: [0.25, 0.50]

@@ -1,0 +1,12 @@
+git+https://github.com/openai/CLIP.git
+ftfy
+regex
+tqdm
+opencv-python
+pandas
+numpy
+matplotlib
+Pillow
+scipy
+scikit-learn
+umap-learn
