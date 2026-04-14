@@ -45,3 +45,10 @@ Mtg Fixes
     * better graph
     * euclidian distance (do they move their eyes more)
 
+
+# Everyday git
+* use branches for features, always do
+git status
+git add -p          # or git add <files>
+git commit -m "Describe the change"
+git push

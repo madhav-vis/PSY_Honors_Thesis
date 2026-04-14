@@ -11,10 +11,30 @@ Dependencies:
 """
 
 import argparse
+import io
 import sys
 import os
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+class TeeStream:
+    """Write to both a real stream and a StringIO buffer."""
+
+    def __init__(self, real_stream):
+        self.real = real_stream
+        self.buf = io.StringIO()
+
+    def write(self, data):
+        self.real.write(data)
+        self.buf.write(data)
+
+    def flush(self):
+        self.real.flush()
+
+    def getvalue(self):
+        return self.buf.getvalue()
 
 
 def run_step(name, module_run):
@@ -44,6 +64,23 @@ def run_all():
     print(f"{'='*60}")
 
 
+def save_log(tee_stdout, tee_stderr, run_dir):
+    """Write captured stdout+stderr to a timestamped log in the run directory."""
+    os.makedirs(run_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(run_dir, f"pipeline_log_{timestamp}.txt")
+    with open(log_path, "w") as f:
+        f.write(f"Pipeline run: {datetime.now().isoformat()}\n")
+        f.write(f"{'='*60}\n\n")
+        f.write(tee_stdout.getvalue())
+        stderr_text = tee_stderr.getvalue()
+        if stderr_text.strip():
+            f.write(f"\n{'='*60}\n")
+            f.write("STDERR:\n")
+            f.write(stderr_text)
+    print(f"\nLog saved: {log_path}")
+
+
 def main():
     steps = {
         "eeg": ("01 — EEG Preprocessing", "eeg_preprocess"),
@@ -63,22 +100,56 @@ def main():
     )
     args = parser.parse_args()
 
-    if "all" in args.steps:
-        run_all()
-        return
+    # Tee stdout/stderr so output goes to terminal AND gets saved
+    tee_stdout = TeeStream(sys.stdout)
+    tee_stderr = TeeStream(sys.stderr)
+    sys.stdout = tee_stdout
+    sys.stderr = tee_stderr
 
-    for step_key in args.steps:
-        if step_key not in steps:
-            print(f"Unknown step: {step_key}. Choose from: {', '.join(steps.keys())}")
-            sys.exit(1)
+    try:
+        from config import (
+            APPLY_ICA, DETECT_BAD_CHANNELS, RUN_DIR, RUN_DATE, RUN_NAME,
+            SFREQ_TARGET, FILTER_LOW, FILTER_HIGH, TARGET_CHANNELS,
+        )
+        print(f"\n{'='*60}")
+        print(f"  RUN CONFIG")
+        print(f"{'='*60}")
+        print(f"  Run dir:              {RUN_DIR}")
+        print(f"  Date:                 {RUN_DATE}")
+        print(f"  Name:                 {RUN_NAME}")
+        print(f"  apply_ica:            {APPLY_ICA}")
+        print(f"  detect_bad_channels:  {DETECT_BAD_CHANNELS}")
+        print(f"  sfreq:                {SFREQ_TARGET} Hz")
+        print(f"  filter:               {FILTER_LOW}–{FILTER_HIGH} Hz")
+        print(f"  target_channels:      {TARGET_CHANNELS}")
+        print(f"  steps:                {args.steps}")
+        print(f"{'='*60}")
 
-        name, module_name = steps[step_key]
-        module = __import__(module_name)
-        run_step(name, module.run)
+        if "all" in args.steps:
+            run_all()
+        else:
+            for step_key in args.steps:
+                if step_key not in steps:
+                    print(f"Unknown step: {step_key}. "
+                          f"Choose from: {', '.join(steps.keys())}")
+                    sys.exit(1)
+                name, module_name = steps[step_key]
+                module = __import__(module_name)
+                run_step(name, module.run)
 
-    print(f"\n{'='*60}")
-    print("  SELECTED STEPS COMPLETE")
-    print(f"{'='*60}")
+            print(f"\n{'='*60}")
+            print("  SELECTED STEPS COMPLETE")
+            print(f"{'='*60}")
+    finally:
+        sys.stdout = tee_stdout.real
+        sys.stderr = tee_stderr.real
+
+        # Resolve run dir from config (imported lazily to avoid side effects)
+        try:
+            from config import RUN_DIR
+            save_log(tee_stdout, tee_stderr, RUN_DIR)
+        except Exception as e:
+            print(f"Warning: could not save log — {e}")
 
 
 if __name__ == "__main__":

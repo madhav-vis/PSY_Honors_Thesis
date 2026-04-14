@@ -1,6 +1,6 @@
 """
 Sanity checks — Layer 1 only (each modality works independently):
-  - EEG:  Go vs NoGo ERP at Pz
+  - EEG:  Go vs NoGo ERP (mean over erp.target_channels from run_config.yaml)
   - ET:   x position, y position, pupil diameter traces
   - Trial count summary
 """
@@ -21,16 +21,25 @@ from config import (
     OUTPUT_DATA_DIR,
     OUTPUT_PLOT_DIR,
     SUBJECTS,
+    TARGET_CHANNELS,
 )
+
+# Must match dashboard and any notes that link to this artifact.
+ERP_GO_NOGO_PLOT_BASENAME = "L1_ERPs_cluster.png"
 
 
 def check_erp_go_nogo(sj_num, conditions=None):
-    """Plot Go vs NoGo ERPs at Pz for each condition (2x2 layout)."""
+    """Plot Go vs NoGo ERPs (mean over TARGET_CHANNELS / yaml erp.target_channels)."""
     if conditions is None:
         conditions = CONDITIONS
 
+    if not TARGET_CHANNELS:
+        print("  ERROR: erp.target_channels empty in config — skipping ERP plot")
+        return
+
     fig, axes = plt.subplots(2, 2, figsize=(16, 10))
     axes = axes.flatten()
+    chans_global = [c for c in TARGET_CHANNELS if isinstance(c, str)]
 
     for i_cond, cond in enumerate(conditions):
         label = cond["eeg_label"]
@@ -71,9 +80,18 @@ def check_erp_go_nogo(sj_num, conditions=None):
         nogo_indices = np.where(trial_data["trialType"] == 20)[0]
         print(f"    Go trials: {len(go_indices)}, NoGo trials: {len(nogo_indices)}")
 
-        chan_to_plot = ["Pz"]
-        if chan_to_plot[0] not in epochs.ch_names:
-            chan_to_plot = [epochs.ch_names[0]]
+        chan_to_plot = [c for c in chans_global if c in epochs.ch_names]
+        if not chan_to_plot:
+            print(f"    Warning: none of TARGET_CHANNELS present in epochs "
+                  f"({TARGET_CHANNELS} vs {list(epochs.ch_names)})")
+            axes[i_cond].text(
+                0.5, 0.5, "No target channels in epochs", ha="center", va="center",
+                transform=axes[i_cond].transAxes, fontsize=12,
+            )
+            continue
+        if len(chan_to_plot) < len(chans_global):
+            missing = [c for c in chans_global if c not in chan_to_plot]
+            print(f"    Note: skipping missing channels: {missing}")
 
         epochs_picked = epochs.copy().pick(chan_to_plot)
         times_ms = epochs_picked.times * 1000
@@ -99,9 +117,16 @@ def check_erp_go_nogo(sj_num, conditions=None):
     for i in range(len(conditions), len(axes)):
         axes[i].set_visible(False)
 
-    fig.suptitle(f"sj{sj_num:02d} Tone Locked ERPs Pz", fontsize=24, y=0.995)
+    ch_title = ", ".join(chans_global)
+    if len(ch_title) > 90:
+        ch_title = ch_title[:87] + "…"
+    fig.suptitle(
+        f"sj{sj_num:02d} Tone Locked ERPs (mean: {ch_title})",
+        fontsize=20, y=0.995,
+    )
     plt.tight_layout()
-    out = os.path.join(OUTPUT_PLOT_DIR, f"sj{sj_num:02d}_L1_ERPs_Pz.png")
+    out = os.path.join(OUTPUT_PLOT_DIR,
+                       f"sj{sj_num:02d}_{ERP_GO_NOGO_PLOT_BASENAME}")
     plt.savefig(out, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"  Saved: {out}")

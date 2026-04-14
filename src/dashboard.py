@@ -432,11 +432,22 @@ with tab_eeg:
             p300_channels = []
         channel_label = ", ".join(p300_channels) if p300_channels else "cluster"
 
-        # ERP plot (pre-rendered)
-        erp_img = os.path.join(plots_dir(selected_run),
-                               f"sj{sj_num:02d}_L1_ERPs_Pz.png")
-        if os.path.exists(erp_img):
-            st.subheader("Go vs NoGo ERPs at Pz")
+        # ERP plot (pre-rendered): cluster ROI from yaml, or legacy Pz-only file
+        pd_run = plots_dir(selected_run)
+        erp_cluster = os.path.join(pd_run,
+                                   f"sj{sj_num:02d}_L1_ERPs_cluster.png")
+        erp_pz = os.path.join(pd_run, f"sj{sj_num:02d}_L1_ERPs_Pz.png")
+        if os.path.exists(erp_cluster):
+            erp_img = erp_cluster
+            erp_caption = "Go vs NoGo ERPs (mean over erp.target_channels)"
+        elif os.path.exists(erp_pz):
+            erp_img = erp_pz
+            erp_caption = "Go vs NoGo ERPs at Pz (legacy plot)"
+        else:
+            erp_img = None
+            erp_caption = None
+        if erp_img:
+            st.subheader(erp_caption)
             st.image(erp_img, use_container_width=True)
         else:
             st.info("No ERP plot found. Run sanity checks first.")

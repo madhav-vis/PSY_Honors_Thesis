@@ -71,18 +71,15 @@ def extract_features(sj_num, cond):
     # P300 — single channel (Pz) for backward compatibility
     p300_pz = _mean_amplitude(epochs, ["Pz"], P300_WINDOW)
 
-    # P300 — cluster average
-    P300_CHANNELS = ["Pz", "P3", "P4", "CPz", "Cz"]
-    P300_TMIN, P300_TMAX = 0.300, 0.500
-    available_p300 = [c for c in P300_CHANNELS if c in epochs.ch_names]
+    # P300 — cluster from run_config.yaml erp.target_channels
+    available_p300 = [c for c in TARGET_CHANNELS if c in epochs.ch_names]
     if len(available_p300) < 3:
         print(f"    Warning: only {len(available_p300)} P300 cluster channels "
               f"available: {available_p300}")
     if not available_p300:
         raise ValueError(f"No P300 channels found. Available: {epochs.ch_names}")
     print(f"    P300 cluster: using {available_p300} ({len(available_p300)} channels)")
-    p300_cluster = _mean_amplitude(epochs, available_p300,
-                                   (P300_TMIN, P300_TMAX))
+    p300_cluster = _mean_amplitude(epochs, available_p300, P300_WINDOW)
 
     # N200 — frontocentral cluster (negative values = expected N200)
     N200_CHANNELS = ["FCz", "Fz", "FC1", "FC2"]

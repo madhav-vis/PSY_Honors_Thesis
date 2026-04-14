@@ -10,6 +10,8 @@ eeg:
   filter_low: 0.1
   filter_high: 30.0
   bad_channel_z_thresh: 3.5
+  detect_bad_channels: false
+  apply_ica: true
   trigger_latency_offset: 60
   tmin: -0.2
   tmax: 1.0
@@ -29,7 +31,7 @@ et:
     sit_unattend: "Unattend_Sit"
 
 erp:
-  target_channels: ["Pz", "C3", "Cz", "C4", "CP1", "CP2", "P3", "P4", "O1", "Oz", "O2"]
+  target_channels: ["Pz"]
   codes: [1, 2, 3]
 
 features:
