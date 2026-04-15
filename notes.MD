@@ -52,3 +52,6 @@ git status
 git add -p          # or git add <files>
 git commit -m "Describe the change"
 git push
+
+## QUESTIONS/KEEP IN MIND
+* subjects 1-4 have hard-coded trail alignment issues, what about other ones?

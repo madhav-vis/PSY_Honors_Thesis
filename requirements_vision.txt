@@ -10,3 +10,4 @@ Pillow
 scipy
 scikit-learn
 umap-learn
+streamlit

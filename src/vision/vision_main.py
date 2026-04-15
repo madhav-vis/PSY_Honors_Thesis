@@ -28,6 +28,7 @@ from vision.frame_extractor import extract_frames_at_timestamps
 from vision.gaze_crop import crop_gaze_region, get_fixation_gaze_center
 from vision.classifier import GazeClassifier
 from vision.annotator import run_annotator
+from vision.train_head import train_from_files
 from vision.visualizer import (
     plot_labeled_frame_grid,
     plot_category_timeline,
@@ -50,6 +51,11 @@ SAVE_DEBUG_FRAMES = True   # Save annotated sample frames for visual QA
 N_DEBUG_FRAMES = 10
 MAX_FIXATIONS = None  # Set to e.g. 20 for testing
 N_CLUSTERS = 7  # Adjust based on Phase 4C silhouette recommendation
+
+# Fine-tuned head: set to a .pt path to use a trained head for classification,
+# or True to auto-train from human labels found in the vision dir.
+# False/None = zero-shot only.
+USE_TRAINED_HEAD = False
 
 
 def _process_condition(sj_num, condition, run_dir, classifier):
@@ -259,6 +265,38 @@ def _process_condition(sj_num, condition, run_dir, classifier):
         run_annotator(crops_dir, human_csv, n_samples=N_LABEL_SAMPLES)
     if os.path.exists(human_csv):
         human_labels_df = pd.read_csv(human_csv)
+
+    # ── PHASE 5B: Train & Apply Fine-Tuned Head ──
+    head_path = os.path.join(vision_dir, f"sj{sj_num:02d}_{label}_head.pt")
+    if USE_TRAINED_HEAD:
+        if isinstance(USE_TRAINED_HEAD, str) and os.path.exists(USE_TRAINED_HEAD):
+            head_path = USE_TRAINED_HEAD
+
+        emb_base = os.path.join(vision_dir, f"sj{sj_num:02d}_{label}_embeddings")
+        if (os.path.exists(human_csv)
+                and os.path.exists(f"{emb_base}.npy")
+                and not os.path.exists(head_path)):
+            print("  Phase 5B — Training linear classification head...")
+            train_from_files(
+                labels_csv=human_csv,
+                embeddings_npy=f"{emb_base}.npy",
+                embeddings_ids_csv=f"{emb_base}_ids.csv",
+                out_model_path=head_path,
+            )
+
+        if os.path.exists(head_path) and not classifier.has_head:
+            classifier.load_head(head_path)
+
+        if classifier.has_head:
+            print("  Phase 5B — Reclassifying with fine-tuned head...")
+            batch_results = classifier.classify_batch(crops_rgb)
+            for i, res in enumerate(batch_results):
+                results_df.loc[i, "gaze_target_category"] = res["label"]
+                results_df.loc[i, "confidence"] = res["confidence"]
+                for cat_label, score in res["all_scores"].items():
+                    results_df.loc[i, f"score_{cat_label}"] = score
+            results_df.to_csv(results_csv, index=False)
+            print(f"    Reclassified {len(results_df)} fixations with fine-tuned head")
 
     # ── PHASE 6: Visualizations ──
     _run_visualizations(sj_num, label, results_df, human_labels_df,
