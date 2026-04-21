@@ -11,7 +11,8 @@ eeg:
   filter_high: 30.0
   bad_channel_z_thresh: 3.5
   detect_bad_channels: false
-  apply_ica: true
+  apply_ica: false
+  use_gedai: true
   trigger_latency_offset: 60
   tmin: -0.2
   tmax: 1.0

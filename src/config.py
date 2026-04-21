@@ -50,6 +50,7 @@ REF_CHANNELS = _eeg["reference_channels"]
 BAD_CHAN_Z_THRESH = _eeg["bad_channel_z_thresh"]
 DETECT_BAD_CHANNELS = _eeg.get("detect_bad_channels", True)
 APPLY_ICA = _eeg.get("apply_ica", True)
+USE_GEDAI = _eeg.get("use_gedai", False)
 TRIGGER_LATENCY_OFFSET = _eeg["trigger_latency_offset"]
 TMIN = _eeg["tmin"]
 TMAX = _eeg["tmax"]

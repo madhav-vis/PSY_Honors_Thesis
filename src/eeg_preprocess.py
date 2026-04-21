@@ -21,6 +21,7 @@ from config import (
     TMAX,
     TMIN,
     TRIGGER_LATENCY_OFFSET,
+    USE_GEDAI,
 )
 
 # ── Hard-coded trial removals (MATLAB parity for sj01–04) ───────────
@@ -166,8 +167,17 @@ def preprocess_eeg(sj_num, cond):
     else:
         print("    Bad-channel detection: disabled (eeg.detect_bad_channels=false)")
 
-    # ── ICA (YAML: eeg.apply_ica) ────────────────────────────────────
-    if APPLY_ICA:
+    # ── Artifact removal: GEDAI or ICA ─────────────────────────────
+    if USE_GEDAI:
+        from gedai_preprocess import apply_gedai
+        gedai_plot_dir = os.path.join(OUTPUT_PLOT_DIR, "gedai")
+        raw, _ = apply_gedai(
+            raw,
+            output_plot_dir=gedai_plot_dir,
+            label=f"sj{sj_num:02d}_{label}",
+        )
+        print("    GEDAI: finished")
+    elif APPLY_ICA:
         print("    ICA: fitting fastica (n_components=0.99 variance on EEG picks)...")
         ica = mne.preprocessing.ICA(
             n_components=0.99, method="fastica",
@@ -235,7 +245,7 @@ def preprocess_eeg(sj_num, cond):
         raw = ica.apply(raw)
         print("    ICA: apply(raw) finished")
     else:
-        print("    ICA: disabled (eeg.apply_ica=false)")
+        print("    Artifact removal: disabled (apply_ica=false, use_gedai=false)")
 
     # ── Epoching ─────────────────────────────────────────────────────
     events, event_id = mne.events_from_annotations(raw)
@@ -256,6 +266,7 @@ def preprocess_eeg(sj_num, cond):
         tmax=TMAX,
         baseline=None,
         preload=True,
+        event_repeated="merge",
         verbose=False,
     )
     epochs.apply_baseline(baseline=BASELINE)
