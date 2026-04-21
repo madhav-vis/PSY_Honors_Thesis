@@ -43,7 +43,7 @@ Mtg Fixes
 * X,Y ET coords graph
     * smoothing function
     * better graph
-    * euclidian distance (do they move their eyes more)
+    * euclidian distance (do they move their eyes more?)
 
 
 # Everyday git
