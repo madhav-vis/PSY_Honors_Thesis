@@ -80,15 +80,15 @@ def apply_gedai(
 
     raw_clean = gedai.transform_raw(raw)
 
-    if not raw_clean.annotations or len(raw_clean.annotations) == 0:
-        raw_clean.set_annotations(raw.annotations)
+    picks_eeg = mne.pick_types(raw.info, eeg=True, exclude="bads")
+    raw._data[picks_eeg] = raw_clean.get_data(picks=picks_eeg)
 
     print(f"    GEDAI [{label}]: transform complete")
 
     if output_plot_dir is not None:
         _save_diagnostics(gedai, output_plot_dir, label)
 
-    return raw_clean, None
+    return raw, None
 
 
 def _save_diagnostics(gedai: Gedai, plot_dir: str, label: str) -> None:

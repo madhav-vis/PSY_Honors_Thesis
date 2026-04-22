@@ -266,7 +266,6 @@ def preprocess_eeg(sj_num, cond):
         tmax=TMAX,
         baseline=None,
         preload=True,
-        event_repeated="merge",
         verbose=False,
     )
     epochs.apply_baseline(baseline=BASELINE)

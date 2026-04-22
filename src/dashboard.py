@@ -307,7 +307,7 @@ with tab_overview:
                 comp_rows.append(row)
         if comp_rows:
             st.subheader("Condition Comparison")
-            st.dataframe(pd.DataFrame(comp_rows), use_container_width=True,
+            st.dataframe(pd.DataFrame(comp_rows), width="stretch",
                          hide_index=True)
 
         for cond in conditions:
@@ -336,14 +336,14 @@ with tab_overview:
                 )
                 fig_oc.update_layout(showlegend=False, height=350,
                                      title="Outcome Distribution")
-                st.plotly_chart(fig_oc, use_container_width=True)
+                st.plotly_chart(fig_oc, width="stretch")
 
             stat_cols = [c for c in features.columns if "rt" in c]
             if stat_cols:
                 stats_df = features[stat_cols].describe().T[["mean", "std", "min", "max"]]
                 stats_df.columns = ["Mean", "Std", "Min", "Max"]
                 st.dataframe(stats_df.style.format("{:.3f}"),
-                             use_container_width=True)
+                             width="stretch")
 
 
 # ════════════════════════════════════════════════════════════
@@ -371,7 +371,7 @@ with tab_eeg:
             erp_caption = None
         if erp_img:
             st.subheader(erp_caption)
-            st.image(erp_img, use_container_width=True)
+            st.image(erp_img, width="stretch")
         else:
             st.info("No ERP plot found. Run sanity checks first.")
 
@@ -430,7 +430,7 @@ with tab_et:
             # Cumulative distance overlay (the key comparison plot)
             st.plotly_chart(
                 et_viz.fig_cumulative_distance(euc_valid),
-                use_container_width=True,
+                width="stretch",
             )
             st.caption(
                 "Slope = rate of eye movement. "
@@ -446,11 +446,11 @@ with tab_et:
                     st.markdown(f"**{cond}**")
                     st.plotly_chart(
                         et_viz.fig_raw_distance(euc_valid[cond]),
-                        use_container_width=True,
+                        width="stretch",
                     )
                     st.plotly_chart(
                         et_viz.fig_rolling_distance(euc_valid[cond]),
-                        use_container_width=True,
+                        width="stretch",
                     )
 
         # ── 2. Spatial Analysis (side by side) ────────────────
@@ -464,7 +464,7 @@ with tab_et:
                     if _et_gaze[cond] is not None:
                         st.plotly_chart(
                             et_viz.fig_heatmap(_et_gaze[cond]),
-                            use_container_width=True,
+                            width="stretch",
                         )
 
         if any(_et_fix[c] is not None for c in conditions):
@@ -477,7 +477,7 @@ with tab_et:
                     if _et_fix[cond] is not None:
                         st.plotly_chart(
                             et_viz.fig_scanpath(_et_fix[cond]),
-                            use_container_width=True,
+                            width="stretch",
                         )
 
             st.subheader("Fixation Map")
@@ -488,7 +488,7 @@ with tab_et:
                     if _et_fix[cond] is not None:
                         st.plotly_chart(
                             et_viz.fig_fixation_map(_et_fix[cond]),
-                            use_container_width=True,
+                            width="stretch",
                         )
 
         # ── 3. Space-Time Cube (side by side, collapsed) ──────
@@ -502,7 +502,7 @@ with tab_et:
                         if _et_gaze[cond] is not None:
                             st.plotly_chart(
                                 et_viz.fig_spacetime_cube(_et_gaze[cond]),
-                                use_container_width=True,
+                                width="stretch",
                             )
 
         # ── 4. Per-condition details ──────────────────────────
@@ -515,7 +515,7 @@ with tab_et:
                     f"sj{sj_num:02d}_L1_gaze_xy_pupil_{_et_cond}.png",
                 )
                 if os.path.exists(gaze_img):
-                    st.image(gaze_img, use_container_width=True,
+                    st.image(gaze_img, width="stretch",
                              caption="Full-Session Gaze Trace")
 
                 traj_img = os.path.join(
@@ -523,7 +523,7 @@ with tab_et:
                     f"sj{sj_num:02d}_L_gaze_trajectories_{_et_cond}.png",
                 )
                 if os.path.exists(traj_img):
-                    st.image(traj_img, use_container_width=True,
+                    st.image(traj_img, width="stretch",
                              caption="Gaze Trajectories by Outcome")
 
                 et_info_path = os.path.join(
@@ -557,7 +557,7 @@ with tab_et:
                     _c3.metric("Mean Gaze X",
                                f"{et_prepro['gaze_mean_x_px'].mean():.0f} px")
                     with st.expander("ET Prepro Table"):
-                        st.dataframe(et_prepro, use_container_width=True,
+                        st.dataframe(et_prepro, width="stretch",
                                      height=300)
 
 
@@ -581,27 +581,27 @@ with tab_vision:
 
             v5_img = os.path.join(vp_dir, f"{_v_prefix}_V5_embedding_clusters.png")
             if os.path.exists(v5_img):
-                st.image(v5_img, use_container_width=True,
+                st.image(v5_img, width="stretch",
                          caption="CLIP Embedding Clusters (UMAP)")
 
             v4_img = os.path.join(vp_dir, f"{_v_prefix}_V4_optimal_k.png")
             if os.path.exists(v4_img):
-                st.image(v4_img, use_container_width=True,
+                st.image(v4_img, width="stretch",
                          caption="Optimal K Analysis")
 
             v6_img = os.path.join(vp_dir, f"{_v_prefix}_V6_cluster_timeline.png")
             if os.path.exists(v6_img):
-                st.image(v6_img, use_container_width=True,
+                st.image(v6_img, width="stretch",
                          caption="Cluster Timeline")
 
             v1_img = os.path.join(vp_dir, f"{_v_prefix}_V1_labeled_frames.png")
             if os.path.exists(v1_img):
-                st.image(v1_img, use_container_width=True,
+                st.image(v1_img, width="stretch",
                          caption="Labeled Frame Grid (Zero-Shot)")
 
             v2_img = os.path.join(vp_dir, f"{_v_prefix}_V2_category_timeline.png")
             if os.path.exists(v2_img):
-                st.image(v2_img, use_container_width=True,
+                st.image(v2_img, width="stretch",
                          caption="Category Timeline (Zero-Shot)")
 
             vr_path = os.path.join(
@@ -629,7 +629,7 @@ with tab_vision:
                     )
                     fig_cl.update_layout(showlegend=False, height=300,
                                          title="Cluster Size Distribution")
-                    st.plotly_chart(fig_cl, use_container_width=True)
+                    st.plotly_chart(fig_cl, width="stretch")
 
                 if "confidence" in vision_results.columns:
                     fig_conf = px.histogram(
@@ -645,10 +645,10 @@ with tab_vision:
                                        annotation_text="reliable")
                     fig_conf.update_layout(height=300,
                                            title="Confidence Distribution")
-                    st.plotly_chart(fig_conf, use_container_width=True)
+                    st.plotly_chart(fig_conf, width="stretch")
 
                 with st.expander("Full Fixation Table"):
-                    st.dataframe(vision_results, use_container_width=True,
+                    st.dataframe(vision_results, width="stretch",
                                  height=400)
 
             crops_d = os.path.join(
@@ -663,7 +663,7 @@ with tab_vision:
                     for i, cf in enumerate(sample):
                         with cols[i % 4]:
                             st.image(cf, caption=os.path.basename(cf),
-                                     use_container_width=True)
+                                     width="stretch")
 
 
 # ════════════════════════════════════════════════════════════
@@ -697,7 +697,7 @@ with tab_fusion:
                     color="Condition",
                 )
                 fig_ent.update_layout(height=350, showlegend=False)
-                st.plotly_chart(fig_ent, use_container_width=True)
+                st.plotly_chart(fig_ent, width="stretch")
 
         for _f_cond in conditions:
             st.markdown("---")
@@ -713,7 +713,7 @@ with tab_fusion:
             ))
 
             if fused is not None:
-                st.dataframe(fused.head(20), use_container_width=True,
+                st.dataframe(fused.head(20), width="stretch",
                              height=350)
                 st.caption(f"Shape: {fused.shape}")
 
@@ -734,11 +734,11 @@ with tab_fusion:
                         })
                 if tensor_info:
                     st.dataframe(pd.DataFrame(tensor_info),
-                                 use_container_width=True, hide_index=True)
+                                 width="stretch", hide_index=True)
 
             if vision_feats is not None:
                 with st.expander("Vision Trial Features"):
                     display_cols = [c for c in vision_feats.columns
                                     if c != "mean_embedding"]
                     st.dataframe(vision_feats[display_cols],
-                                 use_container_width=True, height=350)
+                                 width="stretch", height=350)

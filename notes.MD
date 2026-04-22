@@ -1,14 +1,3 @@
-### Pipeline Improvements: 
-    1. Multi-subject file handling 
-    2. Update on missing trigger detection?
-
-### Currently:
-    1. multi-condition
-    2. How to sync with eye tracking -> create ML vector
-
-### Sanity Check Features
- - **EEG:** P300 amplitude (Pz only)
- - **Eyetracking:** x position, y position, pupil size
 
 ### Overall Plan
  1. Include YAML + Streamlit     
@@ -55,3 +44,6 @@ git push
 
 ## QUESTIONS/KEEP IN MIND
 * subjects 1-4 have hard-coded trail alignment issues, what about other ones?
+
+*Understand + double check ML implementation, questions, looking at the right things
+*Streamlit tab with ML
