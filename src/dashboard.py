@@ -172,13 +172,14 @@ if selected_run and len(subjects) > 1:
 
 # ── Tabs ─────────────────────────────────────────────────────
 
-tab_run, tab_overview, tab_eeg, tab_et, tab_vision, tab_fusion = st.tabs([
+tab_run, tab_overview, tab_eeg, tab_et, tab_vision, tab_fusion, tab_nogo = st.tabs([
     "Run Manager",
     "Overview",
     "EEG",
     "Eye Tracking",
     "Vision",
     "Fusion & DL",
+    "EEGNet",
 ])
 
 
@@ -742,3 +743,336 @@ with tab_fusion:
                                     if c != "mean_embedding"]
                     st.dataframe(vision_feats[display_cols],
                                  width="stretch", height=350)
+
+
+# ════════════════════════════════════════════════════════════
+# TAB 7 — INHIBITORY CONTROL (No-Go ML Pipeline)
+# ════════════════════════════════════════════════════════════
+
+with tab_nogo:
+    if not selected_run or not sj_num:
+        st.info("Select a run and subject.")
+    else:
+        st.header(f"EEGNet — sj{sj_num:02d}")
+        st.caption(
+            "No-go trial classification: correct rejection vs false alarm. "
+            "Phase 6 = EEG-only (EEGNet), Phase 7 = EEG + CLIP gaze fusion."
+        )
+
+        # ── Run button ──
+        col_run1, col_run2, col_run3 = st.columns(3)
+        run_p6 = col_run1.button("Run Phase 6 (EEG-only)", type="primary")
+        run_p7 = col_run2.button("Run Phase 7 (Fusion)")
+        run_p67 = col_run3.button("Run Both (6 + 7)")
+
+        if any([run_p6, run_p7, run_p67]):
+            phases_to_run = []
+            if run_p6:
+                phases_to_run = ["6"]
+            elif run_p7:
+                phases_to_run = ["7"]
+            else:
+                phases_to_run = ["6", "7"]
+
+            cmd = [
+                VENV_PYTHON,
+                os.path.join(PROJECT_ROOT, "src", "train.py"),
+                "--phase", *phases_to_run,
+                "--run", selected_run,
+            ]
+            with st.spinner(f"Running Phase {'+'.join(phases_to_run)}..."):
+                try:
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True,
+                        timeout=600, cwd=PROJECT_ROOT,
+                    )
+                    if result.returncode == 0:
+                        st.success("Complete!")
+                    else:
+                        st.error(f"Failed (exit code {result.returncode})")
+                    with st.expander("Output", expanded=result.returncode != 0):
+                        st.code(result.stdout + result.stderr, language="text")
+                    st.cache_data.clear()
+                except subprocess.TimeoutExpired:
+                    st.error("Timed out (10 min limit)")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+        # ── Load results ──
+        nogo_results_path = os.path.join(
+            run_dir(selected_run), "nogo_results.json")
+        nogo_res = None
+        if os.path.exists(nogo_results_path):
+            with open(nogo_results_path) as _f:
+                nogo_res = json.load(_f)
+
+        ml_results_path = os.path.join(
+            run_dir(selected_run), "ml_results.json")
+        ml_res = None
+        if os.path.exists(ml_results_path):
+            with open(ml_results_path) as _f:
+                ml_res = json.load(_f)
+
+        if nogo_res is None and ml_res is None:
+            st.info("No EEGNet results yet. "
+                    "Click a Run button above to train.")
+        else:
+            p6 = nogo_res.get("phase6", {}) if nogo_res else {}
+            p7 = nogo_res.get("phase7", {}) if nogo_res else {}
+
+            # ── Phase 6: EEG-Only ──
+            st.markdown("---")
+            st.subheader("Model A — EEG-Only (EEGNet)")
+
+            if p6 and "summary" in p6:
+                s6 = p6["summary"]
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Balanced Accuracy",
+                          f"{s6.get('balanced_accuracy_mean', 0):.3f} "
+                          f"± {s6.get('balanced_accuracy_std', 0):.3f}")
+                c2.metric("AUC-ROC",
+                          f"{s6.get('auc_roc_mean', 0):.3f} "
+                          f"± {s6.get('auc_roc_std', 0):.3f}")
+                c3.metric("F1",
+                          f"{s6.get('f1_mean', 0):.3f} "
+                          f"± {s6.get('f1_std', 0):.3f}")
+                c4.metric("No-Go Trials",
+                          f"{p6.get('n_cr', '?')} CR / "
+                          f"{p6.get('n_fa', '?')} FA")
+
+                folds6 = p6.get("fold_results", [])
+                if folds6:
+                    auc_vals = [f["auc_roc"] for f in folds6]
+                    import plotly.graph_objects as _pgo
+                    fig6 = _pgo.Figure()
+                    fig6.add_trace(_pgo.Bar(
+                        x=[f"Fold {f['fold']+1}" for f in folds6],
+                        y=auc_vals,
+                        marker_color="#3498db",
+                        text=[f"{v:.3f}" for v in auc_vals],
+                        textposition="auto",
+                    ))
+                    fig6.add_hline(y=0.5, line_dash="dash",
+                                   line_color="red",
+                                   annotation_text="Chance")
+                    fig6.update_layout(
+                        title="Phase 6 — Per-Fold AUC-ROC",
+                        yaxis_title="AUC-ROC", yaxis_range=[0, 1],
+                        height=350, template="plotly_white",
+                    )
+                    st.plotly_chart(fig6, width="stretch")
+
+                # Confusion matrix
+                cm = s6.get("confusion_matrix_sum")
+                if cm:
+                    cm_arr = np.array(cm)
+                    fig_cm = px.imshow(
+                        cm_arr,
+                        labels=dict(x="Predicted", y="True", color="Count"),
+                        x=["False Alarm", "Correct Rejection"],
+                        y=["False Alarm", "Correct Rejection"],
+                        color_continuous_scale="Blues", text_auto=True,
+                    )
+                    fig_cm.update_layout(title="Confusion Matrix (summed)",
+                                         height=350)
+                    st.plotly_chart(fig_cm, width="stretch")
+            else:
+                st.info("Phase 6 not yet run.")
+
+            # ── Phase 7: Fusion ──
+            st.markdown("---")
+            st.subheader("Model B — EEG + CLIP Gaze Fusion")
+
+            if p7 and "summary" in p7:
+                s7 = p7["summary"]
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Balanced Accuracy",
+                          f"{s7.get('balanced_accuracy_mean', 0):.3f} "
+                          f"± {s7.get('balanced_accuracy_std', 0):.3f}")
+                c2.metric("AUC-ROC",
+                          f"{s7.get('auc_roc_mean', 0):.3f} "
+                          f"± {s7.get('auc_roc_std', 0):.3f}")
+                c3.metric("F1",
+                          f"{s7.get('f1_mean', 0):.3f} "
+                          f"± {s7.get('f1_std', 0):.3f}")
+
+                # Side-by-side bar chart
+                folds6 = p6.get("fold_results", []) if p6 else []
+                folds7 = p7.get("fold_results", [])
+                if folds6 and folds7:
+                    n_f = min(len(folds6), len(folds7))
+                    comp_rows = []
+                    for i in range(n_f):
+                        comp_rows.append({
+                            "Fold": f"Fold {i+1}",
+                            "AUC-ROC": folds6[i]["auc_roc"],
+                            "Model": "A: EEG Only",
+                        })
+                        comp_rows.append({
+                            "Fold": f"Fold {i+1}",
+                            "AUC-ROC": folds7[i]["auc_roc"],
+                            "Model": "B: EEG + Gaze",
+                        })
+                    fig_comp = px.bar(
+                        pd.DataFrame(comp_rows),
+                        x="Fold", y="AUC-ROC", color="Model",
+                        barmode="group",
+                        color_discrete_map={
+                            "A: EEG Only": "#3498db",
+                            "B: EEG + Gaze": "#e67e22",
+                        },
+                    )
+                    fig_comp.add_hline(y=0.5, line_dash="dash",
+                                       line_color="red")
+                    fig_comp.update_layout(
+                        title="Model A vs B — Per-Fold AUC-ROC",
+                        yaxis_range=[0, 1], height=400,
+                        template="plotly_white",
+                    )
+                    st.plotly_chart(fig_comp, width="stretch")
+
+                # Wilcoxon comparison
+                comp = p7.get("comparison", {})
+                if comp and "p_value" in comp:
+                    st.subheader("Statistical Comparison")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Wilcoxon p",
+                              f"{comp['p_value']:.4f}")
+                    c2.metric("Mean AUC Diff",
+                              f"{comp.get('mean_difference', 0):.3f}")
+                    c3.metric("Significant (p<.05)",
+                              "Yes" if comp.get("significant") else "No")
+
+                    if comp.get("significant"):
+                        st.success(
+                            "Gaze context significantly improves "
+                            "inhibitory control prediction!")
+                    else:
+                        st.info(
+                            "No significant difference. "
+                            "More subjects may increase power.")
+            elif p7 and p7.get("skipped"):
+                st.warning(
+                    f"Phase 7 skipped: {p7.get('reason', 'unknown')}. "
+                    f"Run the CLIP vision pipeline first.")
+            else:
+                st.info("Phase 7 not yet run.")
+
+            # ── ERP: CR vs FA ──
+            st.markdown("---")
+            st.subheader("ERP: Correct Rejection vs False Alarm")
+
+            for cond in conditions:
+                try:
+                    import mne
+                    epo_path = os.path.join(
+                        data_dir(selected_run),
+                        f"sj{sj_num:02d}_{cond}_Features-epo.fif")
+                    if not os.path.exists(epo_path):
+                        continue
+                    epochs = mne.read_epochs(epo_path, preload=True,
+                                             verbose=False)
+                    if epochs.metadata is None:
+                        continue
+                    meta = epochs.metadata
+                    if "outcome" not in meta.columns:
+                        continue
+
+                    cr_idx = meta[
+                        meta["outcome"].str.upper() == "CORRECT_REJECTION"
+                    ].index.tolist()
+                    fa_idx = meta[
+                        meta["outcome"].str.upper() == "COMMISSION_ERROR"
+                    ].index.tolist()
+
+                    if not cr_idx and not fa_idx:
+                        continue
+
+                    pz_i = None
+                    for ch in ["Pz", "CPz", "Cz"]:
+                        if ch in epochs.ch_names:
+                            pz_i = epochs.ch_names.index(ch)
+                            break
+                    if pz_i is None:
+                        pz_i = 0
+
+                    edata = epochs.get_data()
+                    times = epochs.times * 1000
+                    import plotly.graph_objects as _pgo2
+
+                    fig_erp = _pgo2.Figure()
+                    if cr_idx:
+                        fig_erp.add_trace(_pgo2.Scatter(
+                            x=times,
+                            y=edata[cr_idx, pz_i, :].mean(0) * 1e6,
+                            name=f"CR (n={len(cr_idx)})",
+                            line=dict(color="#3498db"),
+                        ))
+                    if fa_idx:
+                        fig_erp.add_trace(_pgo2.Scatter(
+                            x=times,
+                            y=edata[fa_idx, pz_i, :].mean(0) * 1e6,
+                            name=f"FA (n={len(fa_idx)})",
+                            line=dict(color="#e74c3c"),
+                        ))
+                    fig_erp.add_vrect(x0=180, x1=350, fillcolor="yellow",
+                                      opacity=0.1, line_width=0,
+                                      annotation_text="N2/P3")
+                    fig_erp.add_vline(x=0, line_dash="dash",
+                                      line_color="gray")
+                    fig_erp.update_layout(
+                        title=f"{cond} — {epochs.ch_names[pz_i]}",
+                        xaxis_title="Time (ms)",
+                        yaxis_title="Amplitude (µV)",
+                        height=350, template="plotly_white",
+                    )
+                    st.plotly_chart(fig_erp, width="stretch")
+                except Exception:
+                    pass
+
+            # ── UMAP Embeddings ──
+            models_dir = os.path.join(run_dir(selected_run), "models")
+            emb_path = os.path.join(models_dir, "nogo_eeg_embeddings.npy")
+            lab_path = os.path.join(models_dir,
+                                     "nogo_eeg_embedding_labels.npy")
+
+            if os.path.exists(emb_path) and os.path.exists(lab_path):
+                st.markdown("---")
+                st.subheader("Embedding Explorer (UMAP)")
+
+                emb = np.load(emb_path)
+                emb_labels = np.load(lab_path)
+
+                try:
+                    from umap import UMAP as _UMAP
+
+                    @st.cache_data
+                    def _compute_umap(_emb_bytes, n_pts):
+                        _emb = np.frombuffer(_emb_bytes,
+                                             dtype=np.float32).reshape(n_pts, -1)
+                        return _UMAP(n_neighbors=15, min_dist=0.1,
+                                     n_components=2,
+                                     random_state=42).fit_transform(_emb)
+
+                    coords = _compute_umap(emb.tobytes(), len(emb))
+
+                    umap_df = pd.DataFrame({
+                        "UMAP1": coords[:, 0],
+                        "UMAP2": coords[:, 1],
+                        "Label": ["CR" if l == 1 else "FA"
+                                   for l in emb_labels],
+                    })
+                    fig_umap = px.scatter(
+                        umap_df, x="UMAP1", y="UMAP2", color="Label",
+                        color_discrete_map={"CR": "#3498db", "FA": "#e74c3c"},
+                        opacity=0.7,
+                    )
+                    fig_umap.update_layout(
+                        height=500, template="plotly_white",
+                        title="EEG Embeddings (No-Go Trials)",
+                    )
+                    fig_umap.update_traces(marker=dict(size=6))
+                    st.plotly_chart(fig_umap, width="stretch")
+                except ImportError:
+                    st.warning("Install umap-learn for embedding plots: "
+                               "pip install umap-learn")

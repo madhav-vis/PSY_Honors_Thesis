@@ -37,3 +37,26 @@ erp:
 
 features:
   p300_window: [0.25, 0.50]
+
+nogo:
+  n_folds: 5
+  n_epochs: 100
+  batch_size: 32
+  learning_rate: 0.001
+  early_stopping_patience: 10
+  save_embeddings: true
+  pre_stimulus_gaze_window_ms: 2000
+  gaze_max_seq_len: 20
+  gaze_encoder_type: "lstm"
+  gaze_embedding_dim: 32
+  gaze_hidden_dim: 64
+  fusion_dropout: 0.3
+
+clip_categories:
+  - "sky"
+  - "ocean"
+  - "water"
+  - "people"
+  - "vegetation"
+  - "trail_ground"
+  - "other"

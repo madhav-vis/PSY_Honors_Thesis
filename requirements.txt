@@ -1,0 +1,33 @@
+# PSY197B — Inhibitory Control ML Pipeline
+# Core dependencies
+
+# EEG
+mne>=1.6
+
+# Deep Learning
+torch>=2.0
+
+# ML & Stats
+scikit-learn>=1.3
+scipy>=1.11
+
+# Data
+numpy>=1.24
+pandas>=2.0
+pyyaml>=6.0
+
+# Visualization
+plotly>=5.18
+matplotlib>=3.8
+streamlit>=1.30
+
+# Embeddings
+umap-learn>=0.5
+
+# Vision / CLIP (for gaze classification pipeline)
+# git+https://github.com/openai/CLIP.git
+# ftfy
+# regex
+# opencv-python
+# Pillow
+# tqdm

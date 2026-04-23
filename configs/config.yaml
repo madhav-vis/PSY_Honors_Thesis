@@ -1,0 +1,74 @@
+data:
+  root: "data"
+  subjects: [4]
+  conditions_available:
+    - "walk_attend"
+    - "walk_unattend"
+    # - "sit_attend"      # uncomment when preprocessed
+    # - "sit_unattend"    # uncomment when preprocessed
+  condition_labels:
+    walk_attend: "Attend_Walk"
+    walk_unattend: "Unattend_Walk"
+    sit_attend: "Attend_Sit"
+    sit_unattend: "Unattend_Sit"
+  et_folder_map:
+    walk_attend: "Attend_Walk"
+    walk_unattend: "Unattend_Walk"
+    sit_attend: "Attend_Sit"
+    sit_unattend: "Unattend_Sit"
+  epoch_window_ms: [-200, 800]
+  pre_stimulus_gaze_window_ms: 2000
+  sfreq: 250
+
+eeg:
+  reference_channels: ["TP9", "TP10"]
+  filter_low: 0.1
+  filter_high: 30.0
+  sfreq_target: 250
+  use_gedai: true
+  apply_ica: false
+  trigger_latency_offset: 60
+  tmin: -0.2
+  tmax: 0.8
+  baseline: [-0.2, 0]
+
+clip_categories:
+  - "sky"
+  - "ocean"
+  - "water"
+  - "people"
+  - "vegetation"
+  - "trail_ground"
+  - "other"
+
+model:
+  eegnet:
+    F1: 8
+    D: 2
+    F2: 16
+    dropout: 0.5
+  gaze_encoder:
+    embedding_dim: 32
+    hidden_dim: 64
+    encoder_type: "lstm"
+  fusion:
+    dropout: 0.3
+
+training:
+  learning_rate: 0.001
+  batch_size: 32
+  epochs: 100
+  early_stopping_patience: 10
+  random_seed: 42
+
+flags:
+  run_generalization: false
+  run_fusion: true
+  save_embeddings: true
+
+results:
+  output_dir: "results/"
+
+preprocessed:
+  use_existing_run: true
+  run_name: null  # null = auto-detect latest

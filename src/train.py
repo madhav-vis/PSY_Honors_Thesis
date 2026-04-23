@@ -28,10 +28,13 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.metrics import (
-    accuracy_score, f1_score, classification_report, confusion_matrix,
+    accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score,
+    classification_report, confusion_matrix,
     mean_squared_error, r2_score,
 )
+from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+from scipy.stats import wilcoxon as wilcoxon_test
 from torch.utils.data import DataLoader, TensorDataset
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -765,6 +768,560 @@ def phase5(run_name):
 
 
 # ═══════════════════════════════════════════════════════════
+#  GAZE SEQUENCE ENCODER (for Phase 7)
+# ═══════════════════════════════════════════════════════════
+
+class GazeSequenceEncoder(nn.Module):
+    """Encodes CLIP fixation category sequences via LSTM or 1D CNN."""
+
+    def __init__(self, n_categories, embedding_dim=32, hidden_dim=64,
+                 encoder_type="lstm", dropout=0.3):
+        super().__init__()
+        self.encoder_type = encoder_type
+        self.category_embed = nn.Linear(n_categories, embedding_dim)
+        self.drop = nn.Dropout(dropout)
+
+        if encoder_type == "lstm":
+            self.encoder = nn.LSTM(
+                input_size=embedding_dim, hidden_size=hidden_dim,
+                num_layers=1, batch_first=True, bidirectional=True,
+            )
+            self.output_dim = hidden_dim * 2
+        else:
+            self.encoder = nn.Sequential(
+                nn.Conv1d(embedding_dim, hidden_dim, kernel_size=3, padding=1),
+                nn.BatchNorm1d(hidden_dim), nn.ELU(),
+                nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+                nn.BatchNorm1d(hidden_dim), nn.ELU(),
+                nn.AdaptiveAvgPool1d(1),
+            )
+            self.output_dim = hidden_dim
+
+    def forward(self, x):
+        emb = self.drop(self.category_embed(x))
+        if self.encoder_type == "lstm":
+            _, (h_n, _) = self.encoder(emb)
+            return torch.cat([h_n[0], h_n[1]], dim=1)
+        return self.encoder(emb.transpose(1, 2)).squeeze(-1)
+
+
+# ═══════════════════════════════════════════════════════════
+#  NO-GO FUSION MODEL (Phase 7)
+# ═══════════════════════════════════════════════════════════
+
+class NoGoFusionNet(nn.Module):
+    """EEGNet + GazeSequenceEncoder → late fusion for no-go CR vs FA."""
+
+    def __init__(self, n_eeg_ch, n_times, n_categories,
+                 F1=8, D=2, F2=16, eeg_dropout=0.25,
+                 gaze_embed_dim=32, gaze_hidden=64, gaze_type="lstm",
+                 fusion_dropout=0.3):
+        super().__init__()
+        self.eeg_branch = EEGNet(n_eeg_ch, n_times, 2, F1, D, F2, eeg_dropout)
+        eeg_embed_dim = self.eeg_branch.flat_size
+        self.eeg_branch.classifier = nn.Identity()
+
+        self.gaze_branch = GazeSequenceEncoder(
+            n_categories, gaze_embed_dim, gaze_hidden, gaze_type, fusion_dropout)
+        gaze_out_dim = self.gaze_branch.output_dim
+
+        self.fusion_head = nn.Sequential(
+            nn.Linear(eeg_embed_dim + gaze_out_dim, 64),
+            nn.ELU(), nn.Dropout(fusion_dropout),
+            nn.Linear(64, 2),
+        )
+
+    def forward(self, x_eeg, x_gaze):
+        eeg_feat = self.eeg_branch.embed(x_eeg)
+        gaze_feat = self.gaze_branch(x_gaze)
+        return self.fusion_head(torch.cat([eeg_feat, gaze_feat], dim=1))
+
+    def embed(self, x_eeg, x_gaze):
+        eeg_feat = self.eeg_branch.embed(x_eeg)
+        gaze_feat = self.gaze_branch(x_gaze)
+        return torch.cat([eeg_feat, gaze_feat], dim=1)
+
+    def load_eegnet_weights(self, state_dict):
+        filtered = {k: v for k, v in state_dict.items()
+                    if not k.startswith("classifier")}
+        self.eeg_branch.load_state_dict(filtered, strict=False)
+
+
+# ═══════════════════════════════════════════════════════════
+#  NO-GO DATA UTILITIES
+# ═══════════════════════════════════════════════════════════
+
+CLIP_CATEGORIES = [
+    "sky", "ocean", "water", "people",
+    "vegetation", "trail_ground", "other",
+]
+
+
+def _pool_and_filter_nogo(run_name):
+    """Pool all conditions, merge train+val, filter to no-go CR vs FA."""
+    conditions = discover_conditions(run_name)
+
+    X_all, y_all, meta_all = [], [], []
+    for cond in conditions:
+        data = load_tensors(run_name, cond)
+        for split in ("train", "val"):
+            X_all.append(data[f"X_eeg_{split}"])
+            y_all.append(data[f"y_{split}"])
+            meta_all.append(data[f"meta_{split}"])
+
+    X_eeg = np.concatenate(X_all)
+    y_gonogo = np.concatenate(y_all)
+    meta = pd.concat(meta_all, ignore_index=True)
+
+    if "outcome" not in meta.columns:
+        print("  No 'outcome' column — cannot distinguish CR from FA")
+        return None
+
+    nogo_mask = y_gonogo == 1
+    if "trialType" in meta.columns:
+        nogo_mask = meta["trialType"].values == 20
+
+    outcome = meta["outcome"].astype(str).str.upper()
+    cr_fa_mask = nogo_mask & outcome.isin(["CORRECT_REJECTION", "COMMISSION_ERROR"])
+    indices = np.where(cr_fa_mask)[0]
+
+    if len(indices) == 0:
+        print("  No valid no-go trials (CR or FA) found")
+        return None
+
+    X = X_eeg[indices]
+    filtered_meta = meta.iloc[indices].reset_index(drop=True)
+    labels = (filtered_meta["outcome"].str.upper() == "CORRECT_REJECTION").astype(int).values
+
+    n_cr, n_fa = int(labels.sum()), int(len(labels) - labels.sum())
+    print(f"  No-go trials: {len(labels)} (CR={n_cr}, FA={n_fa})")
+
+    if n_fa == 0:
+        print("  WARNING: No false alarms found — cannot train binary classifier")
+        return None
+
+    return {"X_eeg": X, "labels": labels, "meta": filtered_meta,
+            "n_cr": n_cr, "n_fa": n_fa, "conditions": conditions}
+
+
+def _load_clip_gaze_sequences(run_name, meta, conditions, pre_stim_ms=2000):
+    """Load CLIP fixation categories per trial from vision results."""
+    vision_root = os.path.join(RUNS_ROOT, run_name, "vision")
+
+    # Also check other runs if current run has no vision data
+    if not os.path.isdir(vision_root):
+        for rn in sorted(os.listdir(RUNS_ROOT), reverse=True):
+            candidate = os.path.join(RUNS_ROOT, rn, "vision")
+            if os.path.isdir(candidate):
+                vision_root = candidate
+                print(f"  Using vision data from run: {rn}")
+                break
+
+    if not os.path.isdir(vision_root):
+        return None
+
+    vision_dfs = {}
+    for vdir in os.listdir(vision_root):
+        vpath = os.path.join(vision_root, vdir, f"{vdir}_vision_results.csv")
+        if os.path.exists(vpath):
+            vision_dfs[vdir] = pd.read_csv(vpath)
+
+    if not vision_dfs or "trigger_time" not in meta.columns:
+        return None
+
+    pre_s = pre_stim_ms / 1000.0
+    sequences = []
+
+    for _, trial in meta.iterrows():
+        tt = trial.get("trigger_time")
+        if tt is None or (isinstance(tt, float) and np.isnan(tt)):
+            sequences.append([])
+            continue
+
+        cats = []
+        for _, vdf in vision_dfs.items():
+            ts_col = "timestamp_s" if "timestamp_s" in vdf.columns else None
+            lab_col = "label" if "label" in vdf.columns else None
+            if ts_col and lab_col:
+                mask = (vdf[ts_col] >= tt - pre_s) & (vdf[ts_col] < tt)
+                cats.extend(vdf.loc[mask, lab_col].tolist())
+        sequences.append(cats)
+
+    n_with = sum(1 for s in sequences if len(s) > 0)
+    print(f"  Gaze sequences: {n_with}/{len(sequences)} trials have CLIP data")
+    return sequences if n_with > 0 else None
+
+
+def _encode_gaze_onehot(sequences, categories=None, max_len=20):
+    """One-hot encode fixation category sequences."""
+    if categories is None:
+        categories = CLIP_CATEGORIES
+    cat_to_idx = {c: i for i, c in enumerate(categories)}
+    n_cats = len(categories)
+    encoded = np.zeros((len(sequences), max_len, n_cats), dtype=np.float32)
+    for i, seq in enumerate(sequences):
+        for j, cat in enumerate(seq[:max_len]):
+            key = cat.lower().strip() if isinstance(cat, str) else ""
+            if key in cat_to_idx:
+                encoded[i, j, cat_to_idx[key]] = 1.0
+    return encoded
+
+
+def _nogo_kfold(model_factory, X_eeg, labels, n_folds=5, n_epochs=100,
+                batch_size=32, lr=1e-3, patience=10,
+                X_gaze=None, is_fusion=False, save_embeds=True):
+    """Stratified k-fold CV for no-go CR vs FA classification."""
+    device = get_device()
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    fold_results = []
+    all_embeddings, all_emb_labels, all_emb_folds = [], [], []
+
+    for fi, (tr_idx, te_idx) in enumerate(skf.split(X_eeg, labels)):
+        print(f"\n    Fold {fi+1}/{n_folds} "
+              f"(train={len(tr_idx)}, test={len(te_idx)})")
+
+        X_tr, X_te = X_eeg[tr_idx].copy(), X_eeg[te_idx].copy()
+        y_tr, y_te = labels[tr_idx], labels[te_idx]
+
+        for ch in range(X_tr.shape[1]):
+            mu, sd = X_tr[:, ch].mean(), X_tr[:, ch].std() + 1e-8
+            X_tr[:, ch] = (X_tr[:, ch] - mu) / sd
+            X_te[:, ch] = (X_te[:, ch] - mu) / sd
+
+        if len(np.unique(y_tr)) < 2 or len(np.unique(y_te)) < 2:
+            print(f"      Skipped — single class in a split")
+            continue
+
+        tr_t = [torch.from_numpy(X_tr).float()]
+        te_t = [torch.from_numpy(X_te).float()]
+        if is_fusion and X_gaze is not None:
+            tr_t.append(torch.from_numpy(X_gaze[tr_idx]).float())
+            te_t.append(torch.from_numpy(X_gaze[te_idx]).float())
+        tr_t.append(torch.from_numpy(y_tr).long())
+        te_t.append(torch.from_numpy(y_te).long())
+
+        train_ld = DataLoader(TensorDataset(*tr_t), batch_size=batch_size, shuffle=True)
+        test_ld = DataLoader(TensorDataset(*te_t), batch_size=batch_size)
+
+        weights = compute_class_weights(y_tr).to(device)
+        criterion = nn.CrossEntropyLoss(weight=weights)
+        model = model_factory().to(device)
+        opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_epochs)
+
+        best_loss, best_state, no_imp = float("inf"), None, 0
+
+        for epoch in range(n_epochs):
+            model.train()
+            for batch in train_ld:
+                if is_fusion:
+                    xe, xg, yb = [b.to(device) for b in batch]
+                    logits = model(xe, xg)
+                else:
+                    xb, yb = batch[0].to(device), batch[-1].to(device)
+                    logits = model(xb)
+                loss = criterion(logits, yb)
+                opt.zero_grad(); loss.backward(); opt.step()
+            sched.step()
+
+            model.eval()
+            vloss, vn = 0.0, 0
+            with torch.no_grad():
+                for batch in test_ld:
+                    if is_fusion:
+                        xe, xg, yb = [b.to(device) for b in batch]
+                        logits = model(xe, xg)
+                    else:
+                        xb, yb = batch[0].to(device), batch[-1].to(device)
+                        logits = model(xb)
+                    vloss += criterion(logits, yb).item() * yb.size(0)
+                    vn += yb.size(0)
+            vloss /= vn
+
+            if vloss < best_loss:
+                best_loss = vloss
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                no_imp = 0
+            else:
+                no_imp += 1
+            if no_imp >= patience:
+                break
+
+        if best_state:
+            model.load_state_dict(best_state)
+
+        model.eval()
+        probs_l, preds_l, tgts_l, embs_l = [], [], [], []
+        with torch.no_grad():
+            for batch in test_ld:
+                if is_fusion:
+                    xe, xg, yb = [b.to(device) for b in batch]
+                    logits = model(xe, xg)
+                    emb = model.embed(xe, xg)
+                else:
+                    xb, yb = batch[0].to(device), batch[-1].to(device)
+                    logits = model(xb)
+                    emb = model.embed(xb)
+                probs_l.extend(torch.softmax(logits, 1)[:, 1].cpu().numpy())
+                preds_l.extend(logits.argmax(1).cpu().numpy())
+                tgts_l.extend(yb.cpu().numpy())
+                embs_l.append(emb.cpu().numpy())
+
+        probs_a, preds_a, tgts_a = np.array(probs_l), np.array(preds_l), np.array(tgts_l)
+        bal_acc = balanced_accuracy_score(tgts_a, preds_a)
+        try:
+            auc = roc_auc_score(tgts_a, probs_a)
+        except ValueError:
+            auc = 0.5
+        f1 = f1_score(tgts_a, preds_a, average="binary", zero_division=0)
+
+        print(f"      bal_acc={bal_acc:.3f}  AUC={auc:.3f}  F1={f1:.3f}")
+
+        fold_results.append({
+            "fold": fi, "balanced_accuracy": float(bal_acc),
+            "auc_roc": float(auc), "f1": float(f1),
+            "n_test": len(te_idx),
+            "confusion_matrix": confusion_matrix(tgts_a, preds_a, labels=[0, 1]).tolist(),
+        })
+
+        if save_embeds:
+            all_embeddings.append(np.concatenate(embs_l))
+            all_emb_labels.append(y_te)
+            all_emb_folds.append(np.full(len(y_te), fi))
+
+        if fi == n_folds - 1 and best_state:
+            fold_results[-1]["_best_state"] = best_state
+
+    if not fold_results:
+        return {"error": "No valid folds completed"}
+
+    summary = {}
+    for key in ["balanced_accuracy", "auc_roc", "f1"]:
+        vals = [r[key] for r in fold_results]
+        summary[f"{key}_mean"] = float(np.mean(vals))
+        summary[f"{key}_std"] = float(np.std(vals))
+        summary[f"{key}_values"] = vals
+    cm_list = [np.array(r["confusion_matrix"]) for r in fold_results]
+    summary["confusion_matrix_sum"] = np.sum(cm_list, axis=0).tolist()
+    summary["n_folds"] = len(fold_results)
+
+    out = {"fold_results": fold_results, "summary": summary}
+    if save_embeds and all_embeddings:
+        out["embeddings"] = np.concatenate(all_embeddings)
+        out["embedding_labels"] = np.concatenate(all_emb_labels)
+        out["embedding_folds"] = np.concatenate(all_emb_folds)
+    return out
+
+
+# ═══════════════════════════════════════════════════════════
+#  PHASE 6 — NO-GO INHIBITORY CONTROL (EEG-Only)
+# ═══════════════════════════════════════════════════════════
+
+def phase6(run_name):
+    """Model A: EEGNet on no-go trials (CR vs FA), stratified k-fold."""
+    print("\n" + "=" * 60)
+    print("  PHASE 6 — NO-GO INHIBITORY CONTROL (EEG-Only)")
+    print("=" * 60)
+
+    nogo = _pool_and_filter_nogo(run_name)
+    if nogo is None:
+        return {"error": "insufficient_data"}
+
+    X, labels = nogo["X_eeg"], nogo["labels"]
+    n_ch, n_t = X.shape[1], X.shape[2]
+
+    results = _nogo_kfold(
+        lambda: EEGNet(n_ch, n_t, 2),
+        X, labels, n_folds=5, n_epochs=100, batch_size=32, patience=10,
+    )
+    if "error" in results:
+        return results
+
+    s = results["summary"]
+    print(f"\n  Phase 6 Summary:")
+    print(f"    Balanced Accuracy: {s['balanced_accuracy_mean']:.3f} "
+          f"± {s['balanced_accuracy_std']:.3f}")
+    print(f"    AUC-ROC:           {s['auc_roc_mean']:.3f} "
+          f"± {s['auc_roc_std']:.3f}")
+    print(f"    F1:                {s['f1_mean']:.3f} "
+          f"± {s['f1_std']:.3f}")
+
+    save_dir = os.path.join(RUNS_ROOT, run_name, "models")
+    os.makedirs(save_dir, exist_ok=True)
+    if "embeddings" in results:
+        np.save(os.path.join(save_dir, "nogo_eeg_embeddings.npy"),
+                results["embeddings"])
+        np.save(os.path.join(save_dir, "nogo_eeg_embedding_labels.npy"),
+                results["embedding_labels"])
+        np.save(os.path.join(save_dir, "nogo_eeg_embedding_folds.npy"),
+                results["embedding_folds"])
+
+    last = results["fold_results"][-1]
+    if "_best_state" in last:
+        torch.save(last["_best_state"],
+                   os.path.join(save_dir, "nogo_eeg_best.pt"))
+
+    # Save detailed results for the dashboard
+    detail = {
+        "summary": s,
+        "fold_results": [{k: v for k, v in r.items() if k != "_best_state"}
+                         for r in results["fold_results"]],
+        "n_cr": nogo["n_cr"], "n_fa": nogo["n_fa"],
+    }
+    import json as _json
+    with open(os.path.join(RUNS_ROOT, run_name, "nogo_results.json"), "w") as f:
+        _json.dump({"phase6": detail}, f, indent=2)
+
+    # Return flat summary for ml_results.json
+    return {
+        "nogo_eeg_kfold": {
+            "balanced_accuracy": s["balanced_accuracy_mean"],
+            "auc_roc": s["auc_roc_mean"],
+            "f1": s["f1_mean"],
+            "n_folds": s["n_folds"],
+            "n_cr": nogo["n_cr"],
+            "n_fa": nogo["n_fa"],
+        },
+        "_internal": results,
+    }
+
+
+# ═══════════════════════════════════════════════════════════
+#  PHASE 7 — NO-GO INHIBITORY CONTROL (EEG + Gaze Fusion)
+# ═══════════════════════════════════════════════════════════
+
+def phase7(run_name, phase6_results=None):
+    """Model B: EEGNet + CLIP gaze fusion on no-go trials."""
+    print("\n" + "=" * 60)
+    print("  PHASE 7 — NO-GO INHIBITORY CONTROL (EEG + Gaze Fusion)")
+    print("=" * 60)
+
+    nogo = _pool_and_filter_nogo(run_name)
+    if nogo is None:
+        return {"error": "insufficient_data"}
+
+    X, labels, meta = nogo["X_eeg"], nogo["labels"], nogo["meta"]
+    n_ch, n_t = X.shape[1], X.shape[2]
+    n_cats = len(CLIP_CATEGORIES)
+
+    gaze_seqs = _load_clip_gaze_sequences(run_name, meta, nogo["conditions"])
+    if gaze_seqs is None:
+        print("\n  No CLIP gaze data available.")
+        print("  Run the vision pipeline first, then re-run: "
+              "python src/train.py --phase 7")
+        return {"skipped": True, "reason": "no_clip_data"}
+
+    X_gaze = _encode_gaze_onehot(gaze_seqs)
+    print(f"  Gaze tensor: {X_gaze.shape}")
+
+    p6_state = None
+    if phase6_results and "_internal" in phase6_results:
+        p6_folds = phase6_results["_internal"].get("fold_results", [])
+        if p6_folds:
+            p6_state = p6_folds[-1].get("_best_state")
+
+    def factory():
+        m = NoGoFusionNet(n_ch, n_t, n_cats,
+                          gaze_embed_dim=32, gaze_hidden=64,
+                          gaze_type="lstm", fusion_dropout=0.3)
+        if p6_state:
+            try:
+                m.load_eegnet_weights(p6_state)
+            except Exception:
+                pass
+        return m
+
+    results = _nogo_kfold(
+        factory, X, labels, n_folds=5, n_epochs=100,
+        batch_size=32, patience=10,
+        X_gaze=X_gaze, is_fusion=True,
+    )
+    if "error" in results:
+        return results
+
+    s = results["summary"]
+    print(f"\n  Phase 7 Summary:")
+    print(f"    Balanced Accuracy: {s['balanced_accuracy_mean']:.3f} "
+          f"± {s['balanced_accuracy_std']:.3f}")
+    print(f"    AUC-ROC:           {s['auc_roc_mean']:.3f} "
+          f"± {s['auc_roc_std']:.3f}")
+    print(f"    F1:                {s['f1_mean']:.3f} "
+          f"± {s['f1_std']:.3f}")
+
+    save_dir = os.path.join(RUNS_ROOT, run_name, "models")
+    if "embeddings" in results:
+        np.save(os.path.join(save_dir, "nogo_fusion_embeddings.npy"),
+                results["embeddings"])
+        np.save(os.path.join(save_dir, "nogo_fusion_embedding_labels.npy"),
+                results["embedding_labels"])
+
+    # Wilcoxon comparison with Phase 6
+    comparison = {}
+    if phase6_results and "_internal" in phase6_results:
+        p6_s = phase6_results["_internal"].get("summary", {})
+        p6_auc = p6_s.get("auc_roc_values", [])
+        p7_auc = s.get("auc_roc_values", [])
+        n = min(len(p6_auc), len(p7_auc))
+        if n >= 2:
+            a, b = np.array(p6_auc[:n]), np.array(p7_auc[:n])
+            diff = b - a
+            comparison = {
+                "metric": "auc_roc", "n_pairs": n,
+                "model_a_mean": float(np.mean(a)),
+                "model_b_mean": float(np.mean(b)),
+                "mean_difference": float(np.mean(diff)),
+            }
+            if not np.all(diff == 0):
+                try:
+                    stat, p = wilcoxon_test(a, b, alternative="two-sided")
+                    comparison["p_value"] = float(p)
+                    comparison["significant"] = p < 0.05
+                    comparison["cohens_d"] = float(
+                        np.mean(diff) / (np.std(diff) + 1e-10))
+                except Exception as e:
+                    comparison["error"] = str(e)
+            else:
+                comparison["p_value"] = 1.0
+                comparison["significant"] = False
+
+            print(f"\n  Model Comparison (A vs B, AUC-ROC):")
+            print(f"    A: {comparison['model_a_mean']:.3f}  "
+                  f"B: {comparison['model_b_mean']:.3f}  "
+                  f"Diff: {comparison['mean_difference']:.3f}")
+            if "p_value" in comparison:
+                print(f"    Wilcoxon p={comparison['p_value']:.4f}  "
+                      f"Significant: {comparison.get('significant')}")
+
+    # Save detailed results for dashboard
+    detail = {
+        "summary": s,
+        "fold_results": [{k: v for k, v in r.items() if k != "_best_state"}
+                         for r in results["fold_results"]],
+        "comparison": comparison,
+        "n_cr": nogo["n_cr"], "n_fa": nogo["n_fa"],
+    }
+    import json as _json
+    nogo_path = os.path.join(RUNS_ROOT, run_name, "nogo_results.json")
+    existing = {}
+    if os.path.exists(nogo_path):
+        with open(nogo_path) as f:
+            existing = _json.load(f)
+    existing["phase7"] = detail
+    with open(nogo_path, "w") as f:
+        _json.dump(existing, f, indent=2)
+
+    return {
+        "nogo_fusion_kfold": {
+            "balanced_accuracy": s["balanced_accuracy_mean"],
+            "auc_roc": s["auc_roc_mean"],
+            "f1": s["f1_mean"],
+            "n_folds": s["n_folds"],
+        },
+        "nogo_comparison": comparison,
+    }
+
+
+# ═══════════════════════════════════════════════════════════
 #  SUMMARY & MAIN
 # ═══════════════════════════════════════════════════════════
 
@@ -805,7 +1362,7 @@ def main():
     args = parser.parse_args()
 
     run_name = args.run or find_latest_run()
-    phases = args.phase or [1, 2, 3, 4, 5]
+    phases = args.phase or [1, 2, 3, 4, 5, 6, 7]
 
     print(f"\nRun: {run_name}")
     print(f"Phases: {phases}")
@@ -823,6 +1380,17 @@ def main():
         all_results["phase4_outcome"] = phase4(run_name)
     if 5 in phases:
         all_results["phase5_vision"] = phase5(run_name)
+    if 6 in phases:
+        p6 = phase6(run_name)
+        all_results["phase6_nogo_eeg"] = {
+            k: v for k, v in p6.items() if not k.startswith("_")}
+        _p6_ref = p6
+    else:
+        _p6_ref = None
+    if 7 in phases:
+        p7 = phase7(run_name, _p6_ref)
+        all_results["phase7_nogo_fusion"] = {
+            k: v for k, v in p7.items() if not k.startswith("_")}
 
     save_summary(run_name, all_results)
 
