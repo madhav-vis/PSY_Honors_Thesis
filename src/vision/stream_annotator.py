@@ -159,7 +159,10 @@ st.sidebar.markdown("---")
 # Train head directly from annotator
 emb_npy = os.path.join(vision_dir, f"{sj_cond}_embeddings.npy")
 emb_ids = os.path.join(vision_dir, f"{sj_cond}_embeddings_ids.csv")
-head_pt = os.path.join(vision_dir, f"{sj_cond}_head.pt")
+_models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "models")
+os.makedirs(_models_dir, exist_ok=True)
+head_pt = os.path.join(_models_dir, "clip_head.pt")
 has_embeddings = os.path.exists(emb_npy) and os.path.exists(emb_ids)
 
 if has_embeddings and n_labeled >= 10:

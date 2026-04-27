@@ -255,7 +255,8 @@ with tab_run:
             st.session_state.pipeline_running = True
             st.session_state.pipeline_log = ""
             cmd = [VENV_PYTHON,
-                   os.path.join(PROJECT_ROOT, "src", "vision", "vision_main.py")]
+                   os.path.join(PROJECT_ROOT, "src", "vision", "vision_main.py"),
+                   "--run-dir", run_dir(selected_run) if selected_run else ""]
             with st.spinner("Running vision pipeline..."):
                 try:
                     result = subprocess.run(
@@ -598,12 +599,17 @@ with tab_vision:
             v1_img = os.path.join(vp_dir, f"{_v_prefix}_V1_labeled_frames.png")
             if os.path.exists(v1_img):
                 st.image(v1_img, width="stretch",
-                         caption="Labeled Frame Grid (Zero-Shot)")
+                         caption="Labeled Frame Grid")
 
             v2_img = os.path.join(vp_dir, f"{_v_prefix}_V2_category_timeline.png")
             if os.path.exists(v2_img):
                 st.image(v2_img, width="stretch",
-                         caption="Category Timeline (Zero-Shot)")
+                         caption="Category Timeline")
+
+            v3_img = os.path.join(vp_dir, f"{_v_prefix}_V3_clip_vs_human.png")
+            if os.path.exists(v3_img):
+                st.image(v3_img, width="stretch",
+                         caption="CLIP vs Human Labels (Accuracy)")
 
             vr_path = os.path.join(
                 vision_dir(selected_run, sj_num, _v_cond),
@@ -619,6 +625,25 @@ with tab_vision:
                 if "cluster_id" in vision_results.columns:
                     _c3.metric("N Clusters",
                                vision_results["cluster_id"].nunique())
+
+                if "gaze_target_category" in vision_results.columns:
+                    cat_counts = vision_results["gaze_target_category"].value_counts()
+                    _cat_colors = {
+                        "sky": "#87CEEB", "ocean": "#1E90FF",
+                        "water": "#4169E1", "people": "#FF6B6B",
+                        "vegetation": "#2E8B57", "trail_ground": "#CD853F",
+                        "other": "#A9A9A9",
+                    }
+                    fig_cat = px.bar(
+                        x=cat_counts.index,
+                        y=cat_counts.values,
+                        labels={"x": "Category", "y": "Count"},
+                        color=cat_counts.index,
+                        color_discrete_map=_cat_colors,
+                    )
+                    fig_cat.update_layout(showlegend=False, height=350,
+                                          title="Category Distribution (Fine-Tuned Head)")
+                    st.plotly_chart(fig_cat, use_container_width=True)
 
                 if "cluster_id" in vision_results.columns:
                     cluster_counts = vision_results["cluster_id"].value_counts().sort_index()

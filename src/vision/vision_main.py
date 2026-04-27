@@ -4,6 +4,7 @@ Run standalone:  python src/vision/vision_main.py
 """
 
 import os
+import shutil
 import sys
 
 import cv2
@@ -40,22 +41,21 @@ from vision.visualizer import (
 )
 from vision import embeddings as emb_module
 
-# ── Configuration (edit these) ────────────────────────────────
+# ── Configuration ─────────────────────────────────────────────
 R_DIR = "/Users/madhav/PSY197B"
-RUN_ID = "2026-04-07_sj04_walk_pilot"
+DEFAULT_RUN_ID = "2026-04-07_sj04_walk_pilot"
 SUBJECTS = [4]
 CONDITIONS = ["walk_attend", "walk_unattend"]
 N_LABEL_SAMPLES = 100
 RUN_ANNOTATOR_FLAG = False
-SAVE_DEBUG_FRAMES = True   # Save annotated sample frames for visual QA
+SAVE_DEBUG_FRAMES = True
 N_DEBUG_FRAMES = 10
-MAX_FIXATIONS = None  # Set to e.g. 20 for testing
-N_CLUSTERS = 7  # Adjust based on Phase 4C silhouette recommendation
+MAX_FIXATIONS = None
+N_CLUSTERS = 7
 
-# Fine-tuned head: set to a .pt path to use a trained head for classification,
-# or True to auto-train from human labels found in the vision dir.
-# False/None = zero-shot only.
-USE_TRAINED_HEAD = False
+# Shared trained classification head (run-independent).
+# Set to a .pt path, True to auto-train from human labels, or False for zero-shot.
+TRAINED_HEAD_PATH = os.path.join(R_DIR, "models", "clip_head.pt")
 
 
 def _process_condition(sj_num, condition, run_dir, classifier):
@@ -64,23 +64,17 @@ def _process_condition(sj_num, condition, run_dir, classifier):
     eye_dir = get_eye_dir(R_DIR, sj_num, label)
     video_path = get_world_video_path(sj_num, label)
     vision_dir = get_vision_out_dir(run_dir, sj_num, label)
+
+    # Clean slate: wipe any previous vision output for this condition
+    if os.path.isdir(vision_dir):
+        shutil.rmtree(vision_dir)
+        print(f"    Cleared previous vision cache: {vision_dir}")
     frames_dir = os.path.join(vision_dir, "frames")
     crops_dir = os.path.join(vision_dir, "crops")
     os.makedirs(frames_dir, exist_ok=True)
     os.makedirs(crops_dir, exist_ok=True)
 
     results_csv = os.path.join(vision_dir, f"sj{sj_num:02d}_{label}_vision_results.csv")
-
-    # Check for existing results (resumable)
-    if os.path.exists(results_csv):
-        print(f"    Loaded existing results from {results_csv}")
-        results_df = pd.read_csv(results_csv)
-        _run_embedding_phases(sj_num, label, results_df, vision_dir,
-                              crops_dir, run_dir, classifier)
-        _run_visualizations(sj_num, label, results_df, None, run_dir,
-                            vision_dir, eye_dir, video_path)
-        _build_fusion_csv(sj_num, label, results_df, run_dir)
-        return results_df
 
     # ── PHASE 1: Load Data ──
     fix_path = os.path.join(eye_dir, "fixations.csv")
@@ -119,74 +113,53 @@ def _process_condition(sj_num, condition, run_dir, classifier):
     midns_to_idx = {int(mid_ns_arr[i]): i for i in range(len(mid_ns_arr))}
 
     # ── PHASE 2: Extract Frames ──
-    existing_frames = [f for f in os.listdir(frames_dir) if f.endswith(".jpg")]
-    if existing_frames:
-        print(f"    Frames dir already has {len(existing_frames)} files — skipping extraction")
-        frames_by_fid = None
-    else:
-        print("    Extracting frames from world video...")
-        ts_frames = extract_frames_at_timestamps(
-            video_path, gaze_df, mid_ns_arr
-        )
-        # Re-key by fixation id (int) for reliable lookup
-        frames_by_fid = {}
-        for ts_ns, frame in ts_frames.items():
-            idx = midns_to_idx.get(ts_ns)
-            if idx is None:
-                continue
-            fid = int(fix_ids[idx])
-            frames_by_fid[fid] = frame
-            cv2.imwrite(os.path.join(frames_dir, f"{fid}_{ts_ns}.jpg"), frame)
-        print(f"    Extracted {len(frames_by_fid)} frames")
+    print("    Extracting frames from world video...")
+    ts_frames = extract_frames_at_timestamps(
+        video_path, gaze_df, mid_ns_arr
+    )
+    frames_by_fid = {}
+    for ts_ns, frame in ts_frames.items():
+        idx = midns_to_idx.get(ts_ns)
+        if idx is None:
+            continue
+        fid = int(fix_ids[idx])
+        frames_by_fid[fid] = frame
+        cv2.imwrite(os.path.join(frames_dir, f"{fid}_{ts_ns}.jpg"), frame)
+    print(f"    Extracted {len(frames_by_fid)} frames")
 
     # ── PHASE 3: Extract Gaze Crops ──
-    existing_crops = [f for f in os.listdir(crops_dir) if f.endswith(".png")]
-    if existing_crops:
-        print(f"    Crops dir already has {len(existing_crops)} files — skipping crop extraction")
-    else:
-        print("    Extracting gaze crops...")
-        if frames_by_fid is None:
-            print("    Re-extracting frames for cropping...")
-            ts_frames = extract_frames_at_timestamps(
-                video_path, gaze_df, mid_ns_arr
-            )
-            frames_by_fid = {}
-            for ts_ns, frame in ts_frames.items():
-                idx = midns_to_idx.get(ts_ns)
-                if idx is not None:
-                    frames_by_fid[int(fix_ids[idx])] = frame
+    print("    Extracting gaze crops...")
+    n_saved = 0
+    n_skipped = 0
+    for i in range(len(fixations)):
+        fid = int(fix_ids[i])
+        ts_ns = int(mid_ns_arr[i])
 
-        n_saved = 0
-        n_skipped = 0
-        for i in range(len(fixations)):
-            fid = int(fix_ids[i])
-            ts_ns = int(mid_ns_arr[i])
+        frame = frames_by_fid.get(fid)
+        if frame is None:
+            n_skipped += 1
+            continue
 
-            frame = frames_by_fid.get(fid)
-            if frame is None:
-                n_skipped += 1
-                continue
+        center = get_fixation_gaze_center(
+            gaze_df, int(start_ns_arr[i]), int(end_ns_arr[i])
+        )
+        if center is None:
+            n_skipped += 1
+            continue
 
-            center = get_fixation_gaze_center(
-                gaze_df, int(start_ns_arr[i]), int(end_ns_arr[i])
-            )
-            if center is None:
-                n_skipped += 1
-                continue
+        gx, gy = center
+        crop = crop_gaze_region(frame, gx, gy, crop_size=CROP_SIZE)
+        if crop is None:
+            n_skipped += 1
+            continue
 
-            gx, gy = center
-            crop = crop_gaze_region(frame, gx, gy, crop_size=CROP_SIZE)
-            if crop is None:
-                n_skipped += 1
-                continue
+        cv2.imwrite(
+            os.path.join(crops_dir, f"{fid}_{ts_ns}.png"),
+            crop[:, :, ::-1],
+        )
+        n_saved += 1
 
-            cv2.imwrite(
-                os.path.join(crops_dir, f"{fid}_{ts_ns}.png"),
-                crop[:, :, ::-1],
-            )
-            n_saved += 1
-
-        print(f"    Saved {n_saved} crops ({n_skipped} skipped — gaze outside frame or no samples)")
+    print(f"    Saved {n_saved} crops ({n_skipped} skipped — gaze outside frame or no samples)")
 
     # ── PHASE 4: CLIP Classification ──
     crop_files = sorted(f for f in os.listdir(crops_dir) if f.endswith(".png"))
@@ -266,29 +239,24 @@ def _process_condition(sj_num, condition, run_dir, classifier):
     if os.path.exists(human_csv):
         human_labels_df = pd.read_csv(human_csv)
 
-    # ── PHASE 5B: Train & Apply Fine-Tuned Head ──
-    head_path = os.path.join(vision_dir, f"sj{sj_num:02d}_{label}_head.pt")
-    if USE_TRAINED_HEAD:
-        if isinstance(USE_TRAINED_HEAD, str) and os.path.exists(USE_TRAINED_HEAD):
-            head_path = USE_TRAINED_HEAD
-
+    # ── PHASE 5B: Train Fine-Tuned Head (if human labels available but no head exists) ──
+    if not classifier.has_head:
         emb_base = os.path.join(vision_dir, f"sj{sj_num:02d}_{label}_embeddings")
         if (os.path.exists(human_csv)
                 and os.path.exists(f"{emb_base}.npy")
-                and not os.path.exists(head_path)):
+                and not os.path.exists(TRAINED_HEAD_PATH)):
             print("  Phase 5B — Training linear classification head...")
             train_from_files(
                 labels_csv=human_csv,
                 embeddings_npy=f"{emb_base}.npy",
                 embeddings_ids_csv=f"{emb_base}_ids.csv",
-                out_model_path=head_path,
+                out_model_path=TRAINED_HEAD_PATH,
             )
-
-        if os.path.exists(head_path) and not classifier.has_head:
-            classifier.load_head(head_path)
+            if os.path.exists(TRAINED_HEAD_PATH):
+                classifier.load_head(TRAINED_HEAD_PATH)
 
         if classifier.has_head:
-            print("  Phase 5B — Reclassifying with fine-tuned head...")
+            print("  Phase 5B — Reclassifying with newly trained head...")
             batch_results = classifier.classify_batch(crops_rgb)
             for i, res in enumerate(batch_results):
                 results_df.loc[i, "gaze_target_category"] = res["label"]
@@ -296,7 +264,7 @@ def _process_condition(sj_num, condition, run_dir, classifier):
                 for cat_label, score in res["all_scores"].items():
                     results_df.loc[i, f"score_{cat_label}"] = score
             results_df.to_csv(results_csv, index=False)
-            print(f"    Reclassified {len(results_df)} fixations with fine-tuned head")
+            print(f"    Reclassified {len(results_df)} fixations")
 
     # ── PHASE 6: Visualizations ──
     _run_visualizations(sj_num, label, results_df, human_labels_df,
@@ -316,64 +284,51 @@ def _run_embedding_phases(sj_num, label, results_df, vision_dir,
                                f"sj{sj_num:02d}_{label}_vision_results.csv")
 
     # ── PHASE 4B: Extract CLIP Embeddings ──
-    if os.path.exists(f"{emb_base}.npy"):
-        embs, fid_list = emb_module.load_embeddings(emb_base)
-    else:
-        print("  Phase 4B — Extracting CLIP embeddings...")
-        crop_files = sorted(f for f in os.listdir(crops_dir)
-                            if f.endswith(".png"))
-        crops_rgb = []
-        fid_list = []
-        for cf in crop_files:
-            img = cv2.imread(os.path.join(crops_dir, cf))
-            if img is None:
-                continue
-            crops_rgb.append(img[:, :, ::-1].copy())
-            fid_list.append(int(cf.split("_")[0]))
-        embs = classifier.extract_embeddings_batch(crops_rgb)
-        emb_module.save_embeddings(embs, fid_list, emb_base)
+    print("  Phase 4B — Extracting CLIP embeddings...")
+    crop_files = sorted(f for f in os.listdir(crops_dir)
+                        if f.endswith(".png"))
+    crops_rgb = []
+    fid_list = []
+    for cf in crop_files:
+        img = cv2.imread(os.path.join(crops_dir, cf))
+        if img is None:
+            continue
+        crops_rgb.append(img[:, :, ::-1].copy())
+        fid_list.append(int(cf.split("_")[0]))
+    embs = classifier.extract_embeddings_batch(crops_rgb)
+    emb_module.save_embeddings(embs, fid_list, emb_base)
     print(f"    Embeddings shape: {embs.shape}")
 
-    # ── PHASE 4C: Find Optimal K (first run only) ──
+    # ── PHASE 4C: Find Optimal K ──
+    print("  Phase 4C — Finding optimal k...")
     k_csv = os.path.join(vision_dir, "k_analysis.csv")
-    if not os.path.exists(k_csv):
-        print("  Phase 4C — Finding optimal k...")
-        k_analysis = emb_module.find_optimal_k(embs, k_range=range(3, 12))
-        pd.DataFrame(k_analysis).to_csv(k_csv, index=False)
+    k_analysis = emb_module.find_optimal_k(embs, k_range=range(3, 12))
+    pd.DataFrame(k_analysis).to_csv(k_csv, index=False)
 
-        plots_dir = os.path.join(run_dir, "plots", "vision")
-        os.makedirs(plots_dir, exist_ok=True)
-        v4_path = os.path.join(plots_dir,
-                               f"sj{sj_num:02d}_{label}_V4_optimal_k.png")
-        plot_optimal_k(k_analysis, v4_path)
+    plots_dir = os.path.join(run_dir, "plots", "vision")
+    os.makedirs(plots_dir, exist_ok=True)
+    v4_path = os.path.join(plots_dir,
+                           f"sj{sj_num:02d}_{label}_V4_optimal_k.png")
+    plot_optimal_k(k_analysis, v4_path)
 
-        best_k = k_analysis["k_values"][
-            int(np.argmax(k_analysis["silhouettes"]))
-        ]
-        print(f"    Recommended n_clusters={best_k} based on silhouette score")
-        print(f"    Set N_CLUSTERS={best_k} in vision_main.py and rerun.")
-    else:
-        print(f"    k_analysis.csv already exists — skipping optimal k search")
+    best_k = k_analysis["k_values"][
+        int(np.argmax(k_analysis["silhouettes"]))
+    ]
+    print(f"    Recommended n_clusters={best_k} based on silhouette score")
 
     # ── PHASE 4D: Cluster Embeddings ──
+    print(f"  Phase 4D — Clustering with K={N_CLUSTERS}...")
     clusters_csv = os.path.join(vision_dir,
                                 f"sj{sj_num:02d}_{label}_clusters.csv")
-    if os.path.exists(clusters_csv):
-        print(f"    Loaded existing clusters from {clusters_csv}")
-        cl_df = pd.read_csv(clusters_csv)
-        cluster_labels = cl_df["cluster_id"].values
-    else:
-        print(f"  Phase 4D — Clustering with K={N_CLUSTERS}...")
-        cluster_labels, _ = emb_module.cluster_embeddings(embs, N_CLUSTERS)
-        cl_df = pd.DataFrame({
-            "fixation_id": fid_list,
-            "cluster_id": cluster_labels,
-        })
-        # Add timestamp_ns from results_df for reference
-        fid_to_ts = dict(zip(results_df["fixation_id"],
-                              results_df["timestamp_ns"]))
-        cl_df["timestamp_ns"] = cl_df["fixation_id"].map(fid_to_ts)
-        cl_df.to_csv(clusters_csv, index=False)
+    cluster_labels, _ = emb_module.cluster_embeddings(embs, N_CLUSTERS)
+    cl_df = pd.DataFrame({
+        "fixation_id": fid_list,
+        "cluster_id": cluster_labels,
+    })
+    fid_to_ts = dict(zip(results_df["fixation_id"],
+                          results_df["timestamp_ns"]))
+    cl_df["timestamp_ns"] = cl_df["fixation_id"].map(fid_to_ts)
+    cl_df.to_csv(clusters_csv, index=False)
 
     # Add cluster_id to results_df and overwrite CSV
     fid_to_cluster = dict(zip(cl_df["fixation_id"], cl_df["cluster_id"]))
@@ -542,12 +497,23 @@ def _build_fusion_csv(sj_num, label, results_df, run_dir):
     print(f"    Built trial-level features for {len(fusion_df)} trials → {out_path}")
 
 
-def run():
-    run_dir = os.path.join(R_DIR, "runs", RUN_ID)
-    os.makedirs(run_dir, exist_ok=True)
+def run(run_dir_override=None):
+    """Run the vision pipeline.
 
+    Args:
+        run_dir_override: Absolute path to the run directory.
+            If None, uses R_DIR/runs/DEFAULT_RUN_ID.
+    """
+    if run_dir_override:
+        the_run_dir = run_dir_override
+    else:
+        the_run_dir = os.path.join(R_DIR, "runs", DEFAULT_RUN_ID)
+    os.makedirs(the_run_dir, exist_ok=True)
+
+    print(f"Vision run dir: {the_run_dir}")
     print("Loading CLIP model...")
-    classifier = GazeClassifier()
+    head = TRAINED_HEAD_PATH if os.path.exists(TRAINED_HEAD_PATH) else None
+    classifier = GazeClassifier(head_path=head)
 
     summary = []
 
@@ -557,13 +523,13 @@ def run():
             print(f"  Vision Pipeline — sj{sj_num:02d} {condition}")
             print(f"{'='*60}")
 
-            results_df = _process_condition(sj_num, condition, run_dir, classifier)
+            results_df = _process_condition(sj_num, condition, the_run_dir, classifier)
 
             if results_df is not None and not results_df.empty:
                 top3 = results_df["gaze_target_category"].value_counts().head(3)
                 top3_str = ", ".join(f"{k}({v})" for k, v in top3.items())
 
-                data_dir = os.path.join(run_dir, "data")
+                data_dir = os.path.join(the_run_dir, "data")
                 fusion_path = os.path.join(data_dir, f"sj{sj_num:02d}_{condition}_vision_trial_features.csv")
                 n_trials = 0
                 if os.path.exists(fusion_path):
@@ -590,4 +556,9 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    import argparse
+    parser = argparse.ArgumentParser(description="Gaze-contingent scene classification")
+    parser.add_argument("--run-dir", default=None,
+                        help="Absolute path to the run directory")
+    args = parser.parse_args()
+    run(run_dir_override=args.run_dir)

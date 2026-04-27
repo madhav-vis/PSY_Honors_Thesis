@@ -158,17 +158,69 @@ def fig_rolling_distance(euc: dict) -> go.Figure:
 # ═══════════════════════════════════════════════════════════
 
 def fig_heatmap(gaze_df: pd.DataFrame) -> go.Figure:
-    """Kernel-density-style heatmap of raw gaze points."""
+    """Kernel-density-style heatmap of raw gaze points.
+
+    Drops extreme outliers (bad samples / wrong units) so a few wild
+    coordinates cannot stretch the axes to ±50k px.
+    """
+    xcol, ycol = "gaze x [px]", "gaze y [px]"
+    df = gaze_df.replace([np.inf, -np.inf], np.nan).dropna(subset=[xcol, ycol])
+    if df.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            height=450,
+            annotations=[dict(text="No gaze points", x=0.5, y=0.5,
+                                xref="paper", yref="paper", showarrow=False)],
+        )
+        return fig
+
+    x = df[xcol].to_numpy(dtype=float)
+    y = df[ycol].to_numpy(dtype=float)
+    lo_x, hi_x = np.percentile(x, [0.5, 99.5])
+    lo_y, hi_y = np.percentile(y, [0.5, 99.5])
+    pad_x = max(8.0, (hi_x - lo_x) * 0.04)
+    pad_y = max(8.0, (hi_y - lo_y) * 0.04)
+    xr0, xr1 = float(lo_x - pad_x), float(hi_x + pad_x)
+    yr0, yr1 = float(lo_y - pad_y), float(hi_y + pad_y)
+    # Typical case: gaze in scene pixel coordinates
+    if lo_x >= -50 and hi_x <= SCENE_W + 50 and lo_y >= -50 and hi_y <= SCENE_H + 50:
+        xr0, xr1 = 0.0, float(SCENE_W)
+        yr0, yr1 = 0.0, float(SCENE_H)
+    # Cap span so rare bogus coordinates cannot blow the axes out
+    max_span = max(float(SCENE_W), float(SCENE_H)) * 2.5
+    if (xr1 - xr0) > max_span:
+        cx = 0.5 * (xr0 + xr1)
+        half = max_span / 2
+        xr0, xr1 = cx - half, cx + half
+    if (yr1 - yr0) > max_span:
+        cy = 0.5 * (yr0 + yr1)
+        half = max_span / 2
+        yr0, yr1 = cy - half, cy + half
+
+    df_plot = df[
+        df[xcol].between(xr0, xr1, inclusive="both")
+        & df[ycol].between(yr0, yr1, inclusive="both")
+    ]
+    if len(df_plot) < 50:
+        df_plot = df
+
     fig = px.density_heatmap(
-        gaze_df, x="gaze x [px]", y="gaze y [px]",
+        df_plot, x=xcol, y=ycol,
         nbinsx=80, nbinsy=60,
         color_continuous_scale="Hot",
-        labels={"gaze x [px]": "X (px)", "gaze y [px]": "Y (px)"},
+        labels={xcol: "X (px)", ycol: "Y (px)"},
     )
+    # Image-style Y: larger pixel y at bottom of plot
     fig.update_layout(
         height=450,
-        xaxis=dict(range=[0, SCENE_W], title="X (px)"),
-        yaxis=dict(range=[SCENE_H, 0], title="Y (px)", scaleanchor="x"),
+        xaxis=dict(range=[xr0, xr1], title="X (px)", autorange=False),
+        yaxis=dict(
+            range=[yr1, yr0],
+            title="Y (px)",
+            scaleanchor="x",
+            scaleratio=1,
+            autorange=False,
+        ),
         coloraxis_colorbar_title="Density",
         margin=dict(l=40, r=20, t=10, b=40),
     )
