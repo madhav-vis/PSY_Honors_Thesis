@@ -69,12 +69,16 @@ def prepare_dl_data(sj_num, cond, test_size=0.2, random_state=42):
                                ET_FOLDER_MAP[label])
         if "trigger_time" in meta.columns and os.path.isdir(eye_dir):
             trigger_times = meta["trigger_time"].values
-            et_result = extract_all_et_epochs(eye_dir, trigger_times)
-            X_et = et_result["X_et"]
-            save_et_tensor(
-                et_result,
-                os.path.join(OUTPUT_DATA_DIR, f"sj{sj_num:02d}_{label}"),
-            )
+            try:
+                et_result = extract_all_et_epochs(eye_dir, trigger_times)
+                X_et = et_result["X_et"]
+                save_et_tensor(
+                    et_result,
+                    os.path.join(OUTPUT_DATA_DIR, f"sj{sj_num:02d}_{label}"),
+                )
+            except Exception as e:
+                print(f"    ET tensor extraction failed for {label}: {e}")
+                print("    Continuing with EEG-only tensors for this condition.")
         else:
             print("    Cannot build ET tensor — missing trigger_time or "
                   "eye dir")

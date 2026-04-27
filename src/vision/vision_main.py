@@ -6,6 +6,7 @@ Run standalone:  python src/vision/vision_main.py
 import os
 import shutil
 import sys
+import yaml
 
 import cv2
 import numpy as np
@@ -43,9 +44,9 @@ from vision import embeddings as emb_module
 
 # ── Configuration ─────────────────────────────────────────────
 R_DIR = "/Users/madhav/PSY197B"
-DEFAULT_RUN_ID = "2026-04-07_sj04_walk_pilot"
+DEFAULT_RUN_ID = None
 SUBJECTS = [4]
-CONDITIONS = ["walk_attend", "walk_unattend"]
+CONDITIONS = None
 N_LABEL_SAMPLES = 100
 RUN_ANNOTATOR_FLAG = False
 SAVE_DEBUG_FRAMES = True
@@ -56,6 +57,30 @@ N_CLUSTERS = 7
 # Shared trained classification head (run-independent).
 # Set to a .pt path, True to auto-train from human labels, or False for zero-shot.
 TRAINED_HEAD_PATH = os.path.join(R_DIR, "models", "clip_head.pt")
+
+
+def _conditions_from_run_dir(run_dir):
+    """Prefer the run snapshot; fallback to global run_config."""
+    candidates = [
+        os.path.join(run_dir, "run_config_snapshot.yaml"),
+        os.path.join(_SRC_DIR, "run_config.yaml"),
+    ]
+    for cfg_path in candidates:
+        if not os.path.exists(cfg_path):
+            continue
+        try:
+            with open(cfg_path, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+            conds = cfg.get("conditions", [])
+            labels = []
+            for c in conds:
+                if isinstance(c, dict) and c.get("eeg_label"):
+                    labels.append(c["eeg_label"])
+            if labels:
+                return labels
+        except Exception:
+            continue
+    return ["walk_attend", "walk_unattend"]
 
 
 def _process_condition(sj_num, condition, run_dir, classifier):
@@ -85,6 +110,9 @@ def _process_condition(sj_num, condition, run_dir, classifier):
         return None
     if not os.path.exists(gaze_path):
         print(f"    Missing gaze: {gaze_path}")
+        return None
+    if not video_path:
+        print(f"    No world-video mapping for condition: {label}")
         return None
     if not os.path.exists(video_path):
         print(f"    Missing world video: {video_path}")
@@ -506,6 +534,19 @@ def run(run_dir_override=None):
     """
     if run_dir_override:
         the_run_dir = run_dir_override
+    elif DEFAULT_RUN_ID is None:
+        runs_root = os.path.join(R_DIR, "runs")
+        run_dirs = sorted(
+            [
+                os.path.join(runs_root, d)
+                for d in os.listdir(runs_root)
+                if os.path.isdir(os.path.join(runs_root, d))
+            ],
+            reverse=True,
+        )
+        if not run_dirs:
+            raise FileNotFoundError("No run directories found in runs/")
+        the_run_dir = run_dirs[0]
     else:
         the_run_dir = os.path.join(R_DIR, "runs", DEFAULT_RUN_ID)
     os.makedirs(the_run_dir, exist_ok=True)
@@ -517,8 +558,10 @@ def run(run_dir_override=None):
 
     summary = []
 
+    run_conditions = CONDITIONS or _conditions_from_run_dir(the_run_dir)
+
     for sj_num in SUBJECTS:
-        for condition in CONDITIONS:
+        for condition in run_conditions:
             print(f"\n{'='*60}")
             print(f"  Vision Pipeline — sj{sj_num:02d} {condition}")
             print(f"{'='*60}")

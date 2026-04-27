@@ -36,6 +36,21 @@ def load_et_data(eye_dir):
         return result
 
     gaze = pd.read_csv(gaze_path)
+    if gaze.empty:
+        print(f"    Gaze file is empty: {gaze_path}")
+        return result
+
+    need_xy = {"gaze x [px]", "gaze y [px]"}
+    if not need_xy.issubset(gaze.columns):
+        print(f"    Gaze file missing required columns {need_xy}: {gaze_path}")
+        return result
+
+    # Keep only rows with valid gaze coordinates.
+    gaze = gaze.dropna(subset=["gaze x [px]", "gaze y [px]"]).reset_index(drop=True)
+    if gaze.empty:
+        print(f"    Gaze file has no valid x/y samples after cleaning: {gaze_path}")
+        return result
+
     gaze["timestamp_s"] = gaze["timestamp [ns]"] / 1e9
     rename_map = {
         "gaze x [px]": "gaze_x",

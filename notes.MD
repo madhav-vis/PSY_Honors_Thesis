@@ -28,15 +28,27 @@ git push
 4/24/26 meeting notes
 - time the eyetracking/vision to triggers
 - clean up data (get rid of uneccesary files)
+- multi-subject
+- look at head movements, imu
+
+
+Computer Vision:
 - Compare ResNet with CLIP 
 - Setup labeling infra for other people
+
+EEG:
 - GEDAI - baseline correcting? kicking out things? how is this working?
+- walking outdoors slack messege for metrics
+
+EEGNet:
 - Meet with Jordan for classifying things?
 - EEGNet sit vs walk condition
     -why 260 trails, what is the embedding explorer?
     - sitting vs walking
     - go vs no-go
     - how is training structured 
-- multi-subject
-- look at head movements, imu
-- walking outdoors slack messege for metrics
+
+
+# Questions:
+
+-sj04 walking conditions missing 3d_eye_states

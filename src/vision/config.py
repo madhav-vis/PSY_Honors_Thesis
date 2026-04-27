@@ -44,6 +44,8 @@ CATEGORY_COLORS = {
 ET_FOLDER_MAP = {
     "walk_attend": "Attend_Walk",
     "walk_unattend": "Unattend_Walk",
+    "sit_attend": "Attend_Sit",
+    "sit_unattend": "Unattend_Sit",
 }
 
 WORLD_VIDEO_DIR = "/Users/madhav/PSY197B_worldvideos"
@@ -52,6 +54,8 @@ WORLD_VIDEO_DIR = "/Users/madhav/PSY197B_worldvideos"
 WORLD_VIDEO_MAP = {
     "walk_attend": "sj{sj_num:02d}_attend_world_video.mp4",
     "walk_unattend": "sj{sj_num:02d}_unattend_world_video.mp4",
+    "sit_attend": "sj{sj_num:02d}_attend_sit_world_video.mp4",
+    "sit_unattend": "sj{sj_num:02d}_unattend_sit_world_video.mp4",
 }
 
 CROP_SIZE = 224
@@ -60,12 +64,17 @@ CLIP_MODEL = "ViT-B/32"
 
 
 def get_eye_dir(r_dir, sj_num, condition_label):
-    folder = ET_FOLDER_MAP[condition_label]
+    folder = ET_FOLDER_MAP.get(condition_label)
+    if folder is None:
+        raise KeyError(f"Unknown condition label for eye folder: {condition_label}")
     return os.path.join(r_dir, "data", f"sj{sj_num:02d}", "eye", folder)
 
 
 def get_world_video_path(sj_num, condition_label):
-    fname = WORLD_VIDEO_MAP[condition_label].format(sj_num=sj_num)
+    template = WORLD_VIDEO_MAP.get(condition_label)
+    if template is None:
+        return None
+    fname = template.format(sj_num=sj_num)
     return os.path.join(WORLD_VIDEO_DIR, fname)
 
 
