@@ -31,7 +31,6 @@ git push
 - multi-subject
 - look at head movements, imu
 
-
 Computer Vision:
 - Compare ResNet with CLIP 
 - Setup labeling infra for other people
@@ -51,4 +50,4 @@ EEGNet:
 
 # Questions:
 
--sj04 walking conditions missing 3d_eye_states
+-sj04 walking conditions missing 3d_eye_states, unattend_sit gaze positions are empty

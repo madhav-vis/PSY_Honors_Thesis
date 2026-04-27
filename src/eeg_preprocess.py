@@ -35,9 +35,11 @@ _MANUAL_TRIAL_DROPS_1BASED = {
     (1, "walk_unattend"):  [130, 133, 295],
     (2, "walk_attend"):    [888],
     (2, "walk_unattend"):  [434, 601, 872],
-    (3, "walk_attend"):    [63, 197, 275, 303, 819, 825, 909, 934],
-    (3, "walk_unattend"):  [72, 188, 193, 318, 384, 389, 417, 420,
-                            472, 490, 502, 658, 726, 898, 900, 902],
+    # sj03 — MATLAB parity drops disabled (2026-04): caused EEG/beh row sync
+    # issues for walk_unattend; re-enable when indices match current exports.
+    # (3, "walk_attend"):    [63, 197, 275, 303, 819, 825, 909, 934],
+    # (3, "walk_unattend"):  [72, 188, 193, 318, 384, 389, 417, 420,
+    #                         472, 490, 502, 658, 726, 898, 900, 902],
     (4, "sit_unattend"):   [984],
 }
 

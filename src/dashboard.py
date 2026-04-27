@@ -153,6 +153,18 @@ def _condition_grid_label(cond_label):
     return cond_label
 
 
+def _go_nogo_indices_from_epochs(epochs):
+    """Indices for Go (10) and NoGo (20); tolerates string/object trialType in metadata."""
+    if epochs.metadata is not None and "trialType" in epochs.metadata.columns:
+        raw = epochs.metadata["trialType"].to_numpy()
+    else:
+        raw = epochs.events[:, 2]
+    codes = pd.to_numeric(pd.Series(raw), errors="coerce").to_numpy(dtype=float)
+    go_idx = np.flatnonzero(codes == 10.0)
+    nogo_idx = np.flatnonzero(codes == 20.0)
+    return go_idx, nogo_idx
+
+
 def _build_movement_behavior_rows(features_df, cond_label):
     if features_df is None or "trialType" not in features_df.columns or "outcome" not in features_df.columns:
         return None
@@ -429,28 +441,29 @@ with tab_eeg:
 
         # Condition-grid ERP (Attend/Unattend × Sit/Walk), no error bars.
         erp_by_cell = {}
+        erp_load_errors = []
+        missing_feature_epo = []
         for cond in conditions:
             epo_path = os.path.join(
                 data_dir(selected_run),
                 f"sj{sj_num:02d}_{cond}_Features-epo.fif",
             )
             if not os.path.exists(epo_path):
+                missing_feature_epo.append((cond, epo_path))
                 continue
             try:
                 epochs = mne.read_epochs(epo_path, preload=True, verbose=False)
                 if len(epochs) == 0:
+                    erp_load_errors.append(f"{cond}: empty Features-epo.fif")
                     continue
                 ch = "Pz" if "Pz" in epochs.ch_names else epochs.ch_names[0]
                 ch_i = epochs.ch_names.index(ch)
                 data_ep = epochs.get_data()
-                trial_codes = (
-                    epochs.metadata["trialType"].to_numpy()
-                    if epochs.metadata is not None and "trialType" in epochs.metadata.columns
-                    else epochs.events[:, 2]
-                )
-                go_idx = np.where(trial_codes == 10)[0]
-                nogo_idx = np.where(trial_codes == 20)[0]
+                go_idx, nogo_idx = _go_nogo_indices_from_epochs(epochs)
                 if len(go_idx) == 0 and len(nogo_idx) == 0:
+                    erp_load_errors.append(
+                        f"{cond}: no trials with trialType 10/20 after coercion"
+                    )
                     continue
                 erp_by_cell[_condition_grid_label(cond)] = {
                     "times_ms": epochs.times * 1000.0,
@@ -459,10 +472,49 @@ with tab_eeg:
                     "n_go": int(len(go_idx)),
                     "n_nogo": int(len(nogo_idx)),
                 }
-            except Exception:
-                continue
+            except Exception as exc:
+                erp_load_errors.append(f"{cond}: {exc}")
 
         cell_order = ["Attend Sit", "Unattend Sit", "Attend Walk", "Unattend Walk"]
+        if missing_feature_epo:
+            lines = [
+                f"`{c}` — expected `{os.path.basename(p)}`"
+                for c, p in missing_feature_epo
+            ]
+            st.warning(
+                "Some conditions have **no feature epochs file** (the interactive ERP grid "
+                "skips them). Usually the pipeline stopped before fusion or feature extraction "
+                "for that block. Pick a run where those files exist, or re-run from EEG "
+                "preprocess / fusion / `extract_features`.\n\n"
+                + "\n".join(lines)
+            )
+        if erp_load_errors:
+            st.warning("Could not build ERP for some conditions:\n\n" + "\n".join(erp_load_errors))
+
+        grid_status_rows = []
+        for cond in conditions:
+            epo_path = os.path.join(
+                data_dir(selected_run),
+                f"sj{sj_num:02d}_{cond}_Features-epo.fif",
+            )
+            cell = _condition_grid_label(cond)
+            grid_status_rows.append({
+                "Condition": cond,
+                "Panel": cell,
+                "Features-epo.fif": "yes" if os.path.exists(epo_path) else "no",
+                "Plotted": "yes" if cell in erp_by_cell else "no",
+            })
+        if grid_status_rows:
+            with st.expander(
+                "ERP grid: `Features-epo.fif` status per condition",
+                expanded=bool(missing_feature_epo),
+            ):
+                st.dataframe(
+                    pd.DataFrame(grid_status_rows),
+                    hide_index=True,
+                    width="stretch",
+                )
+
         if any(c in erp_by_cell for c in cell_order):
             st.markdown("---")
             st.subheader("Go vs NoGo ERPs by attention and movement")

@@ -1,8 +1,8 @@
-run_name: "sj04_walk_pilot"
+run_name: "sj03_all_cond_test"
 date: "auto"
 data:
   root: "data"
-  subjects: [4]
+  subjects: [3]
 
 eeg:
   reference_channels: ["TP9", "TP10"]
