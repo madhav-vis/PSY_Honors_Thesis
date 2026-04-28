@@ -7,10 +7,10 @@ data:
 eeg:
   reference_channels: ["TP9", "TP10"]
   sfreq_target: 250
-  filter_low: 0.1
+  filter_low: 0.5
   filter_high: 30.0
   bad_channel_z_thresh: 3.5
-  detect_bad_channels: false
+  detect_bad_channels: true
   apply_ica: false
   use_gedai: true
   trigger_latency_offset: 60

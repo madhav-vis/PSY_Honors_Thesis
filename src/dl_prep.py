@@ -16,16 +16,28 @@ def _epochs_to_tensor(epochs):
 
 
 def _normalize_epochs(X_train, X_val, X_test=None):
-    """Channel-wise z-score normalization fit on training data."""
+    """Channel-wise z-score normalization fit on training data.
+
+    Computes a single mean and std per channel across all epochs and time
+    points (global per-channel), so the ERP shape is preserved.
+    """
     n_epochs, n_channels, n_times = X_train.shape
 
     scalers = []
     for ch in range(n_channels):
+        # Flatten to (n_epochs * n_times,) so we get one mean/std per channel
+        flat_train = X_train[:, ch, :].reshape(-1, 1)
         scaler = StandardScaler()
-        X_train[:, ch, :] = scaler.fit_transform(X_train[:, ch, :])
-        X_val[:, ch, :] = scaler.transform(X_val[:, ch, :])
+        X_train[:, ch, :] = scaler.fit_transform(flat_train).reshape(n_epochs, n_times)
+        n_val = X_val.shape[0]
+        X_val[:, ch, :] = scaler.transform(
+            X_val[:, ch, :].reshape(-1, 1)
+        ).reshape(n_val, n_times)
         if X_test is not None:
-            X_test[:, ch, :] = scaler.transform(X_test[:, ch, :])
+            n_test = X_test.shape[0]
+            X_test[:, ch, :] = scaler.transform(
+                X_test[:, ch, :].reshape(-1, 1)
+            ).reshape(n_test, n_times)
         scalers.append(scaler)
 
     return X_train, X_val, X_test, scalers

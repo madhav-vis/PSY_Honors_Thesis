@@ -234,10 +234,9 @@ if selected_run and len(subjects) > 1:
 
 # ── Tabs ─────────────────────────────────────────────────────
 
-tab_run, tab_overview, tab_eeg, tab_et, tab_vision, tab_fusion, tab_nogo = st.tabs([
+tab_run, tab_overview, tab_et, tab_vision, tab_fusion, tab_nogo = st.tabs([
     "Run Manager",
     "Overview",
-    "EEG",
     "Eye Tracking",
     "Vision",
     "Fusion & DL",
@@ -355,91 +354,9 @@ with tab_overview:
     else:
         st.header(f"Overview — sj{sj_num:02d}")
 
-        # Condition comparison table
-        comp_rows = []
-        for cond in conditions:
-            f_path = os.path.join(data_dir(selected_run),
-                                  f"sj{sj_num:02d}_{cond}_features.csv")
-            df = load_csv(f_path)
-            if df is not None:
-                row = {"Condition": cond, "N Trials": len(df)}
-                if "trialType" in df.columns:
-                    row["Go"] = int((df["trialType"] == 10).sum())
-                    row["NoGo"] = int((df["trialType"] == 20).sum())
-                if "rt" in df.columns:
-                    row["Mean RT"] = f"{df['rt'].dropna().mean():.3f}"
-                comp_rows.append(row)
-        if comp_rows:
-            st.subheader("Condition Comparison")
-            st.dataframe(pd.DataFrame(comp_rows), width="stretch",
-                         hide_index=True)
+        # ── 2×2 ERP Grid (Go vs NoGo, Attend/Unattend × Sit/Walk) ────
+        st.subheader("Go vs NoGo ERPs — Pz")
 
-        for cond in conditions:
-            st.markdown("---")
-            st.subheader(f"{cond}")
-
-            features = load_csv(os.path.join(
-                data_dir(selected_run),
-                f"sj{sj_num:02d}_{cond}_features.csv",
-            ))
-            if features is None:
-                st.warning(f"No features.csv found for {cond}.")
-                continue
-
-            if "outcome" in features.columns:
-                outcome_counts = features["outcome"].value_counts()
-                fig_oc = px.bar(
-                    x=outcome_counts.index, y=outcome_counts.values,
-                    labels={"x": "Outcome", "y": "Count"},
-                    color=outcome_counts.index,
-                    color_discrete_map={
-                        "HIT": "#2ecc71", "MISS": "#e67e22",
-                        "CORRECT_REJECTION": "#3498db",
-                        "COMMISSION_ERROR": "#e74c3c",
-                    },
-                )
-                fig_oc.update_layout(showlegend=False, height=350,
-                                     title="Outcome Distribution")
-                st.plotly_chart(fig_oc, width="stretch")
-
-            stat_cols = [c for c in features.columns if "rt" in c]
-            if stat_cols:
-                stats_df = features[stat_cols].describe().T[["mean", "std", "min", "max"]]
-                stats_df.columns = ["Mean", "Std", "Min", "Max"]
-                st.dataframe(stats_df.style.format("{:.3f}"),
-                             width="stretch")
-
-
-# ════════════════════════════════════════════════════════════
-# TAB 3 — EEG
-# ════════════════════════════════════════════════════════════
-
-with tab_eeg:
-    if not selected_run or not sj_num:
-        st.info("Select a run and subject.")
-    else:
-        st.header(f"EEG — sj{sj_num:02d}")
-
-        pd_run = plots_dir(selected_run)
-        erp_cluster = os.path.join(pd_run,
-                                   f"sj{sj_num:02d}_L1_ERPs_cluster.png")
-        erp_pz = os.path.join(pd_run, f"sj{sj_num:02d}_L1_ERPs_Pz.png")
-        if os.path.exists(erp_cluster):
-            erp_img = erp_cluster
-            erp_caption = "Go vs NoGo ERPs (mean over erp.target_channels)"
-        elif os.path.exists(erp_pz):
-            erp_img = erp_pz
-            erp_caption = "Go vs NoGo ERPs at Pz (legacy plot)"
-        else:
-            erp_img = None
-            erp_caption = None
-        if erp_img:
-            st.subheader(erp_caption)
-            st.image(erp_img, width="stretch")
-        else:
-            st.info("No ERP plot found. Run sanity checks first.")
-
-        # Condition-grid ERP (Attend/Unattend × Sit/Walk), no error bars.
         erp_by_cell = {}
         erp_load_errors = []
         missing_feature_epo = []
@@ -462,7 +379,7 @@ with tab_eeg:
                 go_idx, nogo_idx = _go_nogo_indices_from_epochs(epochs)
                 if len(go_idx) == 0 and len(nogo_idx) == 0:
                     erp_load_errors.append(
-                        f"{cond}: no trials with trialType 10/20 after coercion"
+                        f"{cond}: no trials with trialType 10/20"
                     )
                     continue
                 erp_by_cell[_condition_grid_label(cond)] = {
@@ -476,100 +393,61 @@ with tab_eeg:
                 erp_load_errors.append(f"{cond}: {exc}")
 
         cell_order = ["Attend Sit", "Unattend Sit", "Attend Walk", "Unattend Walk"]
-        if missing_feature_epo:
-            lines = [
-                f"`{c}` — expected `{os.path.basename(p)}`"
-                for c, p in missing_feature_epo
-            ]
-            st.warning(
-                "Some conditions have **no feature epochs file** (the interactive ERP grid "
-                "skips them). Usually the pipeline stopped before fusion or feature extraction "
-                "for that block. Pick a run where those files exist, or re-run from EEG "
-                "preprocess / fusion / `extract_features`.\n\n"
-                + "\n".join(lines)
-            )
-        if erp_load_errors:
-            st.warning("Could not build ERP for some conditions:\n\n" + "\n".join(erp_load_errors))
 
-        grid_status_rows = []
-        for cond in conditions:
-            epo_path = os.path.join(
-                data_dir(selected_run),
-                f"sj{sj_num:02d}_{cond}_Features-epo.fif",
-            )
-            cell = _condition_grid_label(cond)
-            grid_status_rows.append({
-                "Condition": cond,
-                "Panel": cell,
-                "Features-epo.fif": "yes" if os.path.exists(epo_path) else "no",
-                "Plotted": "yes" if cell in erp_by_cell else "no",
-            })
-        if grid_status_rows:
-            with st.expander(
-                "ERP grid: `Features-epo.fif` status per condition",
-                expanded=bool(missing_feature_epo),
-            ):
-                st.dataframe(
-                    pd.DataFrame(grid_status_rows),
-                    hide_index=True,
-                    width="stretch",
-                )
+        if missing_feature_epo or erp_load_errors:
+            with st.expander("ERP data issues", expanded=True):
+                for c, p in missing_feature_epo:
+                    st.warning(f"`{c}` — missing `{os.path.basename(p)}`")
+                for msg in erp_load_errors:
+                    st.warning(msg)
 
         if any(c in erp_by_cell for c in cell_order):
-            st.markdown("---")
-            st.subheader("Go vs NoGo ERPs by attention and movement")
             fig_grid = make_subplots(
-                rows=2,
-                cols=2,
+                rows=2, cols=2,
                 subplot_titles=cell_order,
-                shared_xaxes=True,
-                shared_yaxes=True,
-                vertical_spacing=0.14,
-                horizontal_spacing=0.10,
+                shared_xaxes=True, shared_yaxes=True,
+                vertical_spacing=0.14, horizontal_spacing=0.10,
             )
             pos = {
-                "Attend Sit": (1, 1),
-                "Unattend Sit": (1, 2),
-                "Attend Walk": (2, 1),
-                "Unattend Walk": (2, 2),
+                "Attend Sit": (1, 1), "Unattend Sit": (1, 2),
+                "Attend Walk": (2, 1), "Unattend Walk": (2, 2),
             }
             for cell, (r, c) in pos.items():
                 item = erp_by_cell.get(cell)
                 if not item:
                     continue
                 if item["nogo"] is not None:
-                    fig_grid.add_trace(
-                        go.Scatter(
-                            x=item["times_ms"],
-                            y=item["nogo"],
-                            mode="lines",
-                            name="NoGo",
-                            line=dict(color="#e74c3c", width=2),
-                            showlegend=(cell == "Attend Sit"),
-                        ),
-                        row=r,
-                        col=c,
-                    )
+                    fig_grid.add_trace(go.Scatter(
+                        x=item["times_ms"], y=item["nogo"],
+                        mode="lines", name=f"NoGo (n={item['n_nogo']})",
+                        line=dict(color="#e74c3c", width=2),
+                        showlegend=(cell == "Attend Sit"),
+                    ), row=r, col=c)
                 if item["go"] is not None:
-                    fig_grid.add_trace(
-                        go.Scatter(
-                            x=item["times_ms"],
-                            y=item["go"],
-                            mode="lines",
-                            name="Go",
-                            line=dict(color="#2980b9", width=2),
-                            showlegend=(cell == "Attend Sit"),
-                        ),
-                        row=r,
-                        col=c,
-                    )
-                fig_grid.add_vline(x=0, line_color="gray", line_dash="dot", row=r, col=c)
+                    fig_grid.add_trace(go.Scatter(
+                        x=item["times_ms"], y=item["go"],
+                        mode="lines", name=f"Go (n={item['n_go']})",
+                        line=dict(color="#2980b9", width=2),
+                        showlegend=(cell == "Attend Sit"),
+                    ), row=r, col=c)
+                fig_grid.add_vline(x=0, line_color="gray", line_dash="dot",
+                                   row=r, col=c)
+                fig_grid.add_vrect(x0=250, x1=500, fillcolor="rgba(255,200,0,0.08)",
+                                   line_width=0, row=r, col=c)
             fig_grid.update_xaxes(title_text="Time (ms)", row=2, col=1)
             fig_grid.update_xaxes(title_text="Time (ms)", row=2, col=2)
-            fig_grid.update_yaxes(title_text="Amplitude (uV)", row=1, col=1)
-            fig_grid.update_yaxes(title_text="Amplitude (uV)", row=2, col=1)
-            fig_grid.update_layout(height=620, template="plotly_white", legend=dict(orientation="h"))
-            st.plotly_chart(fig_grid, width="stretch")
+            fig_grid.update_yaxes(title_text="Amplitude (µV)", row=1, col=1)
+            fig_grid.update_yaxes(title_text="Amplitude (µV)", row=2, col=1)
+            fig_grid.update_layout(
+                height=620, template="plotly_white",
+                legend=dict(orientation="h", y=-0.08),
+            )
+            st.plotly_chart(fig_grid, use_container_width=True)
+            st.caption("Shaded band = P300 window (250–500 ms). Dashed line = stimulus onset.")
+        else:
+            st.info("No ERP data found. Run the full pipeline first (EEG preprocess → fusion → extract_features).")
+
+
 
 
 # ════════════════════════════════════════════════════════════

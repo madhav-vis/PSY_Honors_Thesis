@@ -82,8 +82,9 @@ def load_et_data(eye_dir):
     if os.path.exists(pupil_path):
         pupil = pd.read_csv(pupil_path)
         pupil["timestamp_s"] = pupil["timestamp [ns]"] / 1e9
-        left = pupil.get("pupil_diameter_left_mm")
-        right = pupil.get("pupil_diameter_right_mm")
+        # Pupil Labs exports use bracket notation: "pupil diameter left [mm]"
+        left = pupil.get("pupil diameter left [mm]")
+        right = pupil.get("pupil diameter right [mm]")
         if left is not None and right is not None:
             pupil["pupil_diameter"] = (left + right) / 2
         elif left is not None:
