@@ -12,8 +12,11 @@ import sys
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 import yaml
+import mne
+from plotly.subplots import make_subplots
 
 import et_viz
 
@@ -70,6 +73,19 @@ def load_csv(path):
     return None
 
 
+@st.cache_data(ttl=60)
+def load_first_timestamp_s(path):
+    if not os.path.exists(path):
+        return None
+    try:
+        row = pd.read_csv(path, usecols=["timestamp [ns]"], nrows=1)
+        if row.empty:
+            return None
+        return float(row["timestamp [ns]"].iloc[0]) / 1e9
+    except Exception:
+        return None
+
+
 def _project_data_root():
     try:
         with open(CONFIG_PATH, "r") as f:
@@ -118,6 +134,52 @@ def find_subjects_conditions(rn):
 
 def file_exists_icon(path):
     return "yes" if os.path.exists(path) else "no"
+
+
+def _parse_condition_parts(cond_label):
+    low = str(cond_label).lower()
+    movement = "walk" if "walk" in low else ("sit" if "sit" in low else "other")
+    attention = (
+        "attend" if "attend" in low and "unattend" not in low
+        else ("unattend" if "unattend" in low else "other")
+    )
+    return movement, attention
+
+
+def _condition_grid_label(cond_label):
+    movement, attention = _parse_condition_parts(cond_label)
+    if movement in {"walk", "sit"} and attention in {"attend", "unattend"}:
+        return f"{attention.title()} {movement.title()}"
+    return cond_label
+
+
+def _go_nogo_indices_from_epochs(epochs):
+    """Indices for Go (10) and NoGo (20); tolerates string/object trialType in metadata."""
+    if epochs.metadata is not None and "trialType" in epochs.metadata.columns:
+        raw = epochs.metadata["trialType"].to_numpy()
+    else:
+        raw = epochs.events[:, 2]
+    codes = pd.to_numeric(pd.Series(raw), errors="coerce").to_numpy(dtype=float)
+    go_idx = np.flatnonzero(codes == 10.0)
+    nogo_idx = np.flatnonzero(codes == 20.0)
+    return go_idx, nogo_idx
+
+
+def _build_movement_behavior_rows(features_df, cond_label):
+    if features_df is None or "trialType" not in features_df.columns or "outcome" not in features_df.columns:
+        return None
+    movement, _ = _parse_condition_parts(cond_label)
+    if movement not in {"sit", "walk"}:
+        return None
+    go = features_df[features_df["trialType"] == 10]
+    nogo = features_df[features_df["trialType"] == 20]
+    p_correct = float((go["outcome"].astype(str).str.upper() == "HIT").mean()) if len(go) else np.nan
+    p_error = float((nogo["outcome"].astype(str).str.upper() == "COMMISSION_ERROR").mean()) if len(nogo) else np.nan
+    return {
+        "movement": movement.title(),
+        "pCorrect": p_correct,
+        "pError": p_error,
+    }
 
 
 # ── Sidebar ──────────────────────────────────────────────────
@@ -377,6 +439,138 @@ with tab_eeg:
         else:
             st.info("No ERP plot found. Run sanity checks first.")
 
+        # Condition-grid ERP (Attend/Unattend × Sit/Walk), no error bars.
+        erp_by_cell = {}
+        erp_load_errors = []
+        missing_feature_epo = []
+        for cond in conditions:
+            epo_path = os.path.join(
+                data_dir(selected_run),
+                f"sj{sj_num:02d}_{cond}_Features-epo.fif",
+            )
+            if not os.path.exists(epo_path):
+                missing_feature_epo.append((cond, epo_path))
+                continue
+            try:
+                epochs = mne.read_epochs(epo_path, preload=True, verbose=False)
+                if len(epochs) == 0:
+                    erp_load_errors.append(f"{cond}: empty Features-epo.fif")
+                    continue
+                ch = "Pz" if "Pz" in epochs.ch_names else epochs.ch_names[0]
+                ch_i = epochs.ch_names.index(ch)
+                data_ep = epochs.get_data()
+                go_idx, nogo_idx = _go_nogo_indices_from_epochs(epochs)
+                if len(go_idx) == 0 and len(nogo_idx) == 0:
+                    erp_load_errors.append(
+                        f"{cond}: no trials with trialType 10/20 after coercion"
+                    )
+                    continue
+                erp_by_cell[_condition_grid_label(cond)] = {
+                    "times_ms": epochs.times * 1000.0,
+                    "go": data_ep[go_idx, ch_i, :].mean(axis=0) * 1e6 if len(go_idx) else None,
+                    "nogo": data_ep[nogo_idx, ch_i, :].mean(axis=0) * 1e6 if len(nogo_idx) else None,
+                    "n_go": int(len(go_idx)),
+                    "n_nogo": int(len(nogo_idx)),
+                }
+            except Exception as exc:
+                erp_load_errors.append(f"{cond}: {exc}")
+
+        cell_order = ["Attend Sit", "Unattend Sit", "Attend Walk", "Unattend Walk"]
+        if missing_feature_epo:
+            lines = [
+                f"`{c}` — expected `{os.path.basename(p)}`"
+                for c, p in missing_feature_epo
+            ]
+            st.warning(
+                "Some conditions have **no feature epochs file** (the interactive ERP grid "
+                "skips them). Usually the pipeline stopped before fusion or feature extraction "
+                "for that block. Pick a run where those files exist, or re-run from EEG "
+                "preprocess / fusion / `extract_features`.\n\n"
+                + "\n".join(lines)
+            )
+        if erp_load_errors:
+            st.warning("Could not build ERP for some conditions:\n\n" + "\n".join(erp_load_errors))
+
+        grid_status_rows = []
+        for cond in conditions:
+            epo_path = os.path.join(
+                data_dir(selected_run),
+                f"sj{sj_num:02d}_{cond}_Features-epo.fif",
+            )
+            cell = _condition_grid_label(cond)
+            grid_status_rows.append({
+                "Condition": cond,
+                "Panel": cell,
+                "Features-epo.fif": "yes" if os.path.exists(epo_path) else "no",
+                "Plotted": "yes" if cell in erp_by_cell else "no",
+            })
+        if grid_status_rows:
+            with st.expander(
+                "ERP grid: `Features-epo.fif` status per condition",
+                expanded=bool(missing_feature_epo),
+            ):
+                st.dataframe(
+                    pd.DataFrame(grid_status_rows),
+                    hide_index=True,
+                    width="stretch",
+                )
+
+        if any(c in erp_by_cell for c in cell_order):
+            st.markdown("---")
+            st.subheader("Go vs NoGo ERPs by attention and movement")
+            fig_grid = make_subplots(
+                rows=2,
+                cols=2,
+                subplot_titles=cell_order,
+                shared_xaxes=True,
+                shared_yaxes=True,
+                vertical_spacing=0.14,
+                horizontal_spacing=0.10,
+            )
+            pos = {
+                "Attend Sit": (1, 1),
+                "Unattend Sit": (1, 2),
+                "Attend Walk": (2, 1),
+                "Unattend Walk": (2, 2),
+            }
+            for cell, (r, c) in pos.items():
+                item = erp_by_cell.get(cell)
+                if not item:
+                    continue
+                if item["nogo"] is not None:
+                    fig_grid.add_trace(
+                        go.Scatter(
+                            x=item["times_ms"],
+                            y=item["nogo"],
+                            mode="lines",
+                            name="NoGo",
+                            line=dict(color="#e74c3c", width=2),
+                            showlegend=(cell == "Attend Sit"),
+                        ),
+                        row=r,
+                        col=c,
+                    )
+                if item["go"] is not None:
+                    fig_grid.add_trace(
+                        go.Scatter(
+                            x=item["times_ms"],
+                            y=item["go"],
+                            mode="lines",
+                            name="Go",
+                            line=dict(color="#2980b9", width=2),
+                            showlegend=(cell == "Attend Sit"),
+                        ),
+                        row=r,
+                        col=c,
+                    )
+                fig_grid.add_vline(x=0, line_color="gray", line_dash="dot", row=r, col=c)
+            fig_grid.update_xaxes(title_text="Time (ms)", row=2, col=1)
+            fig_grid.update_xaxes(title_text="Time (ms)", row=2, col=2)
+            fig_grid.update_yaxes(title_text="Amplitude (uV)", row=1, col=1)
+            fig_grid.update_yaxes(title_text="Amplitude (uV)", row=2, col=1)
+            fig_grid.update_layout(height=620, template="plotly_white", legend=dict(orientation="h"))
+            st.plotly_chart(fig_grid, width="stretch")
+
 
 # ════════════════════════════════════════════════════════════
 # TAB 4 — EYE TRACKING
@@ -454,6 +648,208 @@ with tab_et:
                         et_viz.fig_rolling_distance(euc_valid[cond]),
                         width="stretch",
                     )
+
+        # ── 1b. Optical axis + IMU + pupil (aligned) ─────────
+        st.markdown("---")
+        st.subheader("Eye vs head vs pupil (same time axis)")
+        st.caption(
+            "Compare **optical-axis rotation speed** (eyes) with **gyro magnitude** "
+            "(head) and **pupil size** (arousal / effort). "
+            "High eye speed with low gyro often suggests scanning while the head is still."
+        )
+        _tri_cond = conditions[0] if len(conditions) == 1 else st.selectbox(
+            "Condition (3-panel physiology)",
+            conditions,
+            key="triptych_cond",
+        )
+        _tri_dir = _et_eye_dirs.get(_tri_cond, "")
+        _tri_series = (
+            et_viz.build_axis_gyro_pupil_series(_tri_dir)
+            if _tri_dir and os.path.isdir(_tri_dir)
+            else None
+        )
+        if _tri_series is not None:
+            _et_prepro_path = os.path.join(
+                data_dir(selected_run),
+                f"sj{sj_num:02d}_{_tri_cond}_ET_Prepro1.csv",
+            )
+            _et_prepro = load_csv(_et_prepro_path)
+            _trigger_rel = None
+            _x_for_plot = _tri_series["t_s"]
+            _x_label = "Time (s) from first 3d eye sample"
+
+            _vision_rel = None
+            _vr_path = os.path.join(
+                vision_dir(selected_run, sj_num, _tri_cond),
+                f"sj{sj_num:02d}_{_tri_cond}_vision_results.csv",
+            )
+            _vision_results = load_csv(_vr_path)
+
+            if (
+                _et_prepro is not None
+                and "trigger_time" in _et_prepro.columns
+                and _et_prepro["trigger_time"].notna().any()
+            ):
+                _trigger_abs = (
+                    _et_prepro["trigger_time"].dropna().astype(float).to_numpy()
+                )
+                _t0_trig = float(_trigger_abs.min())
+                _x_for_plot = _tri_series["t_abs_s"] - _t0_trig
+                _x_label = "Behavior-aligned time (s from first trial trigger)"
+                _trigger_rel = _trigger_abs - _t0_trig
+
+                # Vision timestamps are stored relative to gaze start.
+                # Convert to absolute with gaze start, then to trigger-relative.
+                if (
+                    _vision_results is not None
+                    and "timestamp_s" in _vision_results.columns
+                    and _vision_results["timestamp_s"].notna().any()
+                ):
+                    _gaze_t0 = load_first_timestamp_s(
+                        os.path.join(_tri_dir, "gaze_positions.csv")
+                    )
+                    if _gaze_t0 is not None:
+                        _vision_abs = _gaze_t0 + _vision_results["timestamp_s"].astype(float).to_numpy()
+                        _vision_rel = _vision_abs - _t0_trig
+
+            st.plotly_chart(
+                et_viz.fig_axis_gyro_pupil_triptych(
+                    _tri_series,
+                    title=f"sj{sj_num:02d} · {_tri_cond}",
+                    x_s=_x_for_plot,
+                    x_label=_x_label,
+                    trigger_s=_trigger_rel,
+                    vision_s=_vision_rel,
+                ),
+                width="stretch",
+            )
+            if _trigger_rel is not None:
+                st.caption(
+                    "Dotted vertical lines = behavioral trial triggers. "
+                    "Yellow dots on panel 1 = vision fixation timestamps."
+                )
+            else:
+                st.caption(
+                    "Behavior trigger table not found for this run/condition, "
+                    "so this view uses raw session time."
+                )
+        else:
+            st.info(
+                f"No `3d_eye_states.csv` in `{_tri_dir or '(unknown)'}` — "
+                "needed for optical axes and pupil."
+            )
+
+        with st.expander("How this plot is computed (blinks, pipeline, …)", expanded=False):
+            st.markdown(
+                """
+**Panel 1 — Eye movement intensity (optical axis)**  
+- Source: `3d_eye_states.csv` (Pupil Labs export).  
+- Left and right optical-axis vectors are **row-normalized** to unit vectors **û**.  
+- At each time sample we estimate **|dû/dt|** using `numpy.gradient` along the
+  session clock (uneven spacing is allowed). That norm is the instantaneous
+  **angular speed of the gaze direction** in space (deg/s).  
+- The trace is the **mean of left and right** angular speeds.  
+- This is **not** the same as screen-plane Euclidean distance from
+  `gaze_positions.csv` (the plots above): axis motion is 3-D gaze direction;
+  screen metrics mix projection and head movement.
+
+**Panel 2 — Head movement intensity**  
+- Source: `imu.csv` gyro columns (`gyro x/y/z [deg/s]`).  
+- Plotted value: **√(gx² + gy² + gz²)** in deg/s.  
+- IMU timestamps rarely match eye samples; we **linearly interpolate** gyro
+  magnitude onto the eye time grid (same **t = 0** as the first row of
+  `3d_eye_states.csv`).
+
+**Panel 3 — Pupil (arousal / load)**  
+- **Average of left and right** `pupil diameter [mm]` from the same file as
+  panel 1. **Not** blink-rejected here: during blinks, diameters often go to
+  junk values; interpret dips with the blink bands or with trial-level blink
+  flags from preprocessing.
+
+**Behavior + vision alignment (for long recordings)**  
+- If `ET_Prepro1.csv` is available, all three traces are re-plotted on a
+  **behavior-anchored axis**: seconds from the first trial trigger.  
+- Dotted vertical lines mark every behavioral trigger (`trigger_time`).  
+- Vision fixation timestamps (`vision_results.csv`) are converted from their
+  gaze-relative clock to that same trigger-aligned axis and shown as yellow dots.
+
+**Gray vertical bands — blink windows**  
+- The dashboard infers blink-like periods from eyelid aperture in
+  `3d_eye_states.csv` (when either `eyelid aperture left/right [mm]` drops
+  below ~1 mm).  
+- **Separate from this figure:** the main pipeline (`et_preprocess` /
+  `et_timeseries`) computes epoch-level blink flags independently; those are the
+  `has_blink` values shown in **Session Details**.
+
+**Performance**  
+- Long sessions are **decimated** (~25k points max) for responsiveness; totals
+  and shapes are unchanged in the raw files.
+                """
+            )
+
+        # ── 1c. Sit vs walk physiology + behavior summary ───────────
+        st.markdown("---")
+        st.subheader("Sit vs Walk Summary")
+
+        # Physiology summary from 3d_eye_states + imu.
+        phys_rows = []
+        for _c in conditions:
+            _s = et_viz.build_axis_gyro_pupil_series(_et_eye_dirs.get(_c, ""))
+            if _s is None:
+                continue
+            _mv, _att = _parse_condition_parts(_c)
+            phys_rows.append({
+                "Condition": _c,
+                "Movement": _mv.title(),
+                "Attention": _att.title(),
+                "Pupil (mm)": float(np.nanmedian(_s["pupil_mm"])),
+                "Eye speed (deg/s)": float(np.nanmedian(_s["omega_eye_deg_s"])),
+                "Gyro (deg/s)": float(np.nanmedian(_s["gyro_mag_deg_s"])),
+            })
+        if phys_rows:
+            st.dataframe(pd.DataFrame(phys_rows), width="stretch", hide_index=True)
+        else:
+            st.info("No `3d_eye_states.csv` available for current conditions.")
+
+        # Behavior summary bars (no error bars): pCorrect (Go HIT rate), pError (NoGo CE rate).
+        beh_rows = []
+        for _c in conditions:
+            _feat = load_csv(
+                os.path.join(data_dir(selected_run), f"sj{sj_num:02d}_{_c}_features.csv")
+            )
+            _row = _build_movement_behavior_rows(_feat, _c)
+            if _row is not None:
+                beh_rows.append(_row)
+        if beh_rows:
+            _beh = pd.DataFrame(beh_rows)
+            _agg = (
+                _beh.groupby("movement", as_index=False)[["pCorrect", "pError"]]
+                .mean()
+                .rename(columns={"movement": "Movement"})
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                fig_hit = px.bar(
+                    _agg,
+                    x="Movement",
+                    y="pCorrect",
+                    title="Hits (pCorrect)",
+                    color_discrete_sequence=["#1f77b4"],
+                    range_y=[0, 1],
+                )
+                fig_hit.update_layout(showlegend=False, height=330)
+                st.plotly_chart(fig_hit, width="stretch")
+            with c2:
+                fig_ce = px.bar(
+                    _agg,
+                    x="Movement",
+                    y="pError",
+                    title="Commission Errors (pError)",
+                    color_discrete_sequence=["#1f77b4"],
+                    range_y=[0, 1],
+                )
+                fig_ce.update_layout(showlegend=False, height=330)
+                st.plotly_chart(fig_ce, width="stretch")
 
         # ── 2. Spatial Analysis (side by side) ────────────────
         if any(_et_gaze[c] is not None for c in conditions):

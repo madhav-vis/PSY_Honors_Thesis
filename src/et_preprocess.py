@@ -41,6 +41,7 @@ def preprocess_et_wide(sj_num, cond):
 
     annotations = load_et("annotations.csv")
     gaze = load_et("gaze_positions.csv")
+    eye3d = load_et("3d_eye_states.csv")
 
     if annotations is None or gaze is None:
         print("    Missing annotations or gaze — skipping")
@@ -52,6 +53,16 @@ def preprocess_et_wide(sj_num, cond):
     gaze["timestamp_s"] = gaze["timestamp [ns]"] / 1e9
 
     has_pupil = "pupil diameter [mm]" in gaze.columns
+    has_3d_pupil = (
+        eye3d is not None
+        and "timestamp [ns]" in eye3d.columns
+        and (
+            "pupil diameter left [mm]" in eye3d.columns
+            or "pupil diameter right [mm]" in eye3d.columns
+        )
+    )
+    if has_3d_pupil:
+        eye3d["timestamp_s"] = eye3d["timestamp [ns]"] / 1e9
 
     epoch_records = []
     for _, row in triggers.iterrows():
@@ -68,8 +79,28 @@ def preprocess_et_wide(sj_num, cond):
             "gaze_mean_y_px": gaze_win["gaze y [px]"].mean() if len(gaze_win) else np.nan,
         }
 
-        if has_pupil:
-            rec["pupil_diameter_mm"] = gaze_win["pupil diameter [mm]"].mean() if len(gaze_win) else np.nan
+        pupil_val = np.nan
+        if has_pupil and len(gaze_win):
+            pupil_val = gaze_win["pupil diameter [mm]"].mean()
+
+        # Fallback for recordings where gaze_positions has no/poor pupil values:
+        # use 3d_eye_states left/right pupil diameters in the same trial window.
+        if (not np.isfinite(pupil_val)) and has_3d_pupil:
+            eye3d_win = eye3d[eye3d["timestamp_s"].between(t0 + TMIN, t0 + TMAX)]
+            if len(eye3d_win):
+                pupils = []
+                if "pupil diameter left [mm]" in eye3d_win.columns:
+                    pupils.append(
+                        eye3d_win["pupil diameter left [mm]"].to_numpy(dtype=float)
+                    )
+                if "pupil diameter right [mm]" in eye3d_win.columns:
+                    pupils.append(
+                        eye3d_win["pupil diameter right [mm]"].to_numpy(dtype=float)
+                    )
+                if pupils:
+                    pupil_val = np.nanmean(np.vstack(pupils), axis=0).mean()
+
+        rec["pupil_diameter_mm"] = pupil_val
 
         epoch_records.append(rec)
 

@@ -6,6 +6,7 @@ Run standalone:  python src/vision/vision_main.py
 import os
 import shutil
 import sys
+import yaml
 
 import cv2
 import numpy as np
@@ -25,6 +26,10 @@ from vision.config import (
     get_vision_out_dir,
     get_world_video_path,
 )
+from vision.label_store import (
+    load_labels_for,
+    mirror_crops_dir,
+)
 from vision.frame_extractor import extract_frames_at_timestamps
 from vision.gaze_crop import crop_gaze_region, get_fixation_gaze_center
 from vision.classifier import GazeClassifier
@@ -43,9 +48,9 @@ from vision import embeddings as emb_module
 
 # ── Configuration ─────────────────────────────────────────────
 R_DIR = "/Users/madhav/PSY197B"
-DEFAULT_RUN_ID = "2026-04-07_sj04_walk_pilot"
+DEFAULT_RUN_ID = None
 SUBJECTS = [4]
-CONDITIONS = ["walk_attend", "walk_unattend"]
+CONDITIONS = None
 N_LABEL_SAMPLES = 100
 RUN_ANNOTATOR_FLAG = False
 SAVE_DEBUG_FRAMES = True
@@ -56,6 +61,30 @@ N_CLUSTERS = 7
 # Shared trained classification head (run-independent).
 # Set to a .pt path, True to auto-train from human labels, or False for zero-shot.
 TRAINED_HEAD_PATH = os.path.join(R_DIR, "models", "clip_head.pt")
+
+
+def _conditions_from_run_dir(run_dir):
+    """Prefer the run snapshot; fallback to global run_config."""
+    candidates = [
+        os.path.join(run_dir, "run_config_snapshot.yaml"),
+        os.path.join(_SRC_DIR, "run_config.yaml"),
+    ]
+    for cfg_path in candidates:
+        if not os.path.exists(cfg_path):
+            continue
+        try:
+            with open(cfg_path, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+            conds = cfg.get("conditions", [])
+            labels = []
+            for c in conds:
+                if isinstance(c, dict) and c.get("eeg_label"):
+                    labels.append(c["eeg_label"])
+            if labels:
+                return labels
+        except Exception:
+            continue
+    return ["walk_attend", "walk_unattend"]
 
 
 def _process_condition(sj_num, condition, run_dir, classifier):
@@ -85,6 +114,9 @@ def _process_condition(sj_num, condition, run_dir, classifier):
         return None
     if not os.path.exists(gaze_path):
         print(f"    Missing gaze: {gaze_path}")
+        return None
+    if not video_path:
+        print(f"    No world-video mapping for condition: {label}")
         return None
     if not os.path.exists(video_path):
         print(f"    Missing world video: {video_path}")
@@ -160,6 +192,11 @@ def _process_condition(sj_num, condition, run_dir, classifier):
         n_saved += 1
 
     print(f"    Saved {n_saved} crops ({n_skipped} skipped — gaze outside frame or no samples)")
+
+    # Mirror crops to stable data/crops/ so labels survive pipeline re-runs
+    n_mirrored = mirror_crops_dir(crops_dir, sj_num, label)
+    if n_mirrored:
+        print(f"    Mirrored {n_mirrored} new crops → data/crops/sj{sj_num:02d}_{label}/")
 
     # ── PHASE 4: CLIP Classification ──
     crop_files = sorted(f for f in os.listdir(crops_dir) if f.endswith(".png"))
@@ -239,23 +276,42 @@ def _process_condition(sj_num, condition, run_dir, classifier):
     if os.path.exists(human_csv):
         human_labels_df = pd.read_csv(human_csv)
 
-    # ── PHASE 5B: Train Fine-Tuned Head (if human labels available but no head exists) ──
-    if not classifier.has_head:
-        emb_base = os.path.join(vision_dir, f"sj{sj_num:02d}_{label}_embeddings")
-        if (os.path.exists(human_csv)
-                and os.path.exists(f"{emb_base}.npy")
-                and not os.path.exists(TRAINED_HEAD_PATH)):
-            print("  Phase 5B — Training linear classification head...")
-            train_from_files(
-                labels_csv=human_csv,
-                embeddings_npy=f"{emb_base}.npy",
-                embeddings_ids_csv=f"{emb_base}_ids.csv",
-                out_model_path=TRAINED_HEAD_PATH,
-            )
-            if os.path.exists(TRAINED_HEAD_PATH):
-                classifier.load_head(TRAINED_HEAD_PATH)
+    # ── PHASE 5B: Train Fine-Tuned Head ──
+    # Retrain if: no head yet, OR central label count grew since last training.
+    emb_base = os.path.join(vision_dir, f"sj{sj_num:02d}_{label}_embeddings")
+    central_labels = load_labels_for(sj_num, label)
+    n_central = len(central_labels)
 
-        if classifier.has_head:
+    head_is_stale = False
+    if os.path.exists(TRAINED_HEAD_PATH):
+        import torch as _torch
+        try:
+            _ckpt = _torch.load(TRAINED_HEAD_PATH, map_location="cpu", weights_only=True)
+            head_is_stale = n_central > _ckpt.get("stats", {}).get("n_samples", 0)
+        except Exception:
+            head_is_stale = True
+
+    should_train = (
+        n_central >= 10
+        and os.path.exists(f"{emb_base}.npy")
+        and (not os.path.exists(TRAINED_HEAD_PATH) or head_is_stale)
+    )
+
+    if should_train:
+        print("  Phase 5B — Training linear classification head from central store...")
+        from vision.train_head import train_from_label_store
+        train_from_label_store(
+            sj_num=sj_num,
+            condition=label,
+            embeddings_base=emb_base,
+            out_model_path=TRAINED_HEAD_PATH,
+        )
+        if os.path.exists(TRAINED_HEAD_PATH):
+            classifier.load_head(TRAINED_HEAD_PATH)
+    elif not classifier.has_head and os.path.exists(TRAINED_HEAD_PATH):
+        classifier.load_head(TRAINED_HEAD_PATH)
+
+    if classifier.has_head:
             print("  Phase 5B — Reclassifying with newly trained head...")
             batch_results = classifier.classify_batch(crops_rgb)
             for i, res in enumerate(batch_results):
@@ -506,6 +562,19 @@ def run(run_dir_override=None):
     """
     if run_dir_override:
         the_run_dir = run_dir_override
+    elif DEFAULT_RUN_ID is None:
+        runs_root = os.path.join(R_DIR, "runs")
+        run_dirs = sorted(
+            [
+                os.path.join(runs_root, d)
+                for d in os.listdir(runs_root)
+                if os.path.isdir(os.path.join(runs_root, d))
+            ],
+            reverse=True,
+        )
+        if not run_dirs:
+            raise FileNotFoundError("No run directories found in runs/")
+        the_run_dir = run_dirs[0]
     else:
         the_run_dir = os.path.join(R_DIR, "runs", DEFAULT_RUN_ID)
     os.makedirs(the_run_dir, exist_ok=True)
@@ -517,8 +586,10 @@ def run(run_dir_override=None):
 
     summary = []
 
+    run_conditions = CONDITIONS or _conditions_from_run_dir(the_run_dir)
+
     for sj_num in SUBJECTS:
-        for condition in CONDITIONS:
+        for condition in run_conditions:
             print(f"\n{'='*60}")
             print(f"  Vision Pipeline — sj{sj_num:02d} {condition}")
             print(f"{'='*60}")

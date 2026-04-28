@@ -1,8 +1,8 @@
-run_name: "sj04_walk_pilot"
+run_name: "sj03_all_cond_test"
 date: "auto"
 data:
   root: "data"
-  subjects: [4]
+  subjects: [3]
 
 eeg:
   reference_channels: ["TP9", "TP10"]
@@ -19,6 +19,10 @@ eeg:
   baseline: [-0.2, 0]
 
 conditions:
+  - eeg_label: "sit_attend"
+    trial_label: "Attend_Sit"
+  - eeg_label: "sit_unattend"
+    trial_label: "Unattend_Sit"
   - eeg_label: "walk_attend"
     trial_label: "Attend_Walk"
   - eeg_label: "walk_unattend"

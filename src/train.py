@@ -940,11 +940,25 @@ def _load_clip_gaze_sequences(run_name, meta, conditions, pre_stim_ms=2000):
 
         cats = []
         for _, vdf in vision_dfs.items():
-            ts_col = "timestamp_s" if "timestamp_s" in vdf.columns else None
-            lab_col = "label" if "label" in vdf.columns else None
-            if ts_col and lab_col:
-                mask = (vdf[ts_col] >= tt - pre_s) & (vdf[ts_col] < tt)
-                cats.extend(vdf.loc[mask, lab_col].tolist())
+            # Prefer absolute timestamps if available; otherwise keep legacy behavior.
+            if "timestamp_ns" in vdf.columns:
+                ts = vdf["timestamp_ns"].astype(np.float64) / 1e9
+            elif "timestamp_s" in vdf.columns:
+                ts = vdf["timestamp_s"].astype(np.float64)
+            else:
+                continue
+
+            if "gaze_target_category" in vdf.columns:
+                lab_col = "gaze_target_category"
+            elif "label" in vdf.columns:
+                lab_col = "label"
+            else:
+                continue
+
+            mask = (ts >= tt - pre_s) & (ts < tt)
+            if np.any(mask):
+                vals = vdf.loc[mask, lab_col].dropna()
+                cats.extend(vals.astype(str).tolist())
         sequences.append(cats)
 
     n_with = sum(1 for s in sequences if len(s) > 0)
