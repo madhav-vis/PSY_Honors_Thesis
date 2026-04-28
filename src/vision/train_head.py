@@ -251,6 +251,66 @@ def train_from_files(labels_csv, embeddings_npy, embeddings_ids_csv,
     return stats
 
 
+def train_from_label_store(sj_num, condition, embeddings_base,
+                           out_model_path, **kwargs):
+    """Train from the central label store.
+
+    Args:
+        sj_num: subject number (int), or None to pool all subjects.
+        condition: condition string, or None to pool all conditions.
+        embeddings_base: path prefix for <base>.npy and <base>_ids.csv —
+            used only when sj_num/condition are specified. Pooled training
+            requires embeddings to exist per-subject (uses first available).
+        out_model_path: where to save the .pt file.
+
+    Returns stats dict, or None if not enough data.
+    """
+    import sys, os
+    _src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _src not in sys.path:
+        sys.path.insert(0, _src)
+    from vision.label_store import load_labels, load_labels_for
+
+    if sj_num is not None and condition is not None:
+        labels_df = load_labels_for(int(sj_num), condition)
+        scope = f"sj{sj_num:02d} {condition}"
+    else:
+        labels_df = load_labels()
+        scope = "all subjects pooled"
+
+    if labels_df.empty:
+        print(f"  No labels found in central store ({scope})")
+        return None
+
+    print(f"  Training CLIP linear head from central store ({scope}, "
+          f"{len(labels_df)} labels)")
+
+    emb_npy = f"{embeddings_base}.npy"
+    emb_ids = f"{embeddings_base}_ids.csv"
+    if not os.path.exists(emb_npy) or not os.path.exists(emb_ids):
+        print(f"    Embeddings not found at {embeddings_base}")
+        return None
+
+    # Write a temp CSV compatible with _load_labeled_embeddings
+    import tempfile
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".csv", delete=False
+    ) as tmp:
+        tmp_path = tmp.name
+        labels_df[["fixation_id", "human_label"]].to_csv(tmp_path, index=False)
+
+    try:
+        return train_from_files(
+            labels_csv=tmp_path,
+            embeddings_npy=emb_npy,
+            embeddings_ids_csv=emb_ids,
+            out_model_path=out_model_path,
+            **kwargs,
+        )
+    finally:
+        os.unlink(tmp_path)
+
+
 # ── Standalone entry point ────────────────────────────────────
 
 if __name__ == "__main__":

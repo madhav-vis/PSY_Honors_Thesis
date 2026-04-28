@@ -26,6 +26,10 @@ from vision.config import (
     get_vision_out_dir,
     get_world_video_path,
 )
+from vision.label_store import (
+    load_labels_for,
+    mirror_crops_dir,
+)
 from vision.frame_extractor import extract_frames_at_timestamps
 from vision.gaze_crop import crop_gaze_region, get_fixation_gaze_center
 from vision.classifier import GazeClassifier
@@ -189,6 +193,11 @@ def _process_condition(sj_num, condition, run_dir, classifier):
 
     print(f"    Saved {n_saved} crops ({n_skipped} skipped — gaze outside frame or no samples)")
 
+    # Mirror crops to stable data/crops/ so labels survive pipeline re-runs
+    n_mirrored = mirror_crops_dir(crops_dir, sj_num, label)
+    if n_mirrored:
+        print(f"    Mirrored {n_mirrored} new crops → data/crops/sj{sj_num:02d}_{label}/")
+
     # ── PHASE 4: CLIP Classification ──
     crop_files = sorted(f for f in os.listdir(crops_dir) if f.endswith(".png"))
     if not crop_files:
@@ -267,23 +276,42 @@ def _process_condition(sj_num, condition, run_dir, classifier):
     if os.path.exists(human_csv):
         human_labels_df = pd.read_csv(human_csv)
 
-    # ── PHASE 5B: Train Fine-Tuned Head (if human labels available but no head exists) ──
-    if not classifier.has_head:
-        emb_base = os.path.join(vision_dir, f"sj{sj_num:02d}_{label}_embeddings")
-        if (os.path.exists(human_csv)
-                and os.path.exists(f"{emb_base}.npy")
-                and not os.path.exists(TRAINED_HEAD_PATH)):
-            print("  Phase 5B — Training linear classification head...")
-            train_from_files(
-                labels_csv=human_csv,
-                embeddings_npy=f"{emb_base}.npy",
-                embeddings_ids_csv=f"{emb_base}_ids.csv",
-                out_model_path=TRAINED_HEAD_PATH,
-            )
-            if os.path.exists(TRAINED_HEAD_PATH):
-                classifier.load_head(TRAINED_HEAD_PATH)
+    # ── PHASE 5B: Train Fine-Tuned Head ──
+    # Retrain if: no head yet, OR central label count grew since last training.
+    emb_base = os.path.join(vision_dir, f"sj{sj_num:02d}_{label}_embeddings")
+    central_labels = load_labels_for(sj_num, label)
+    n_central = len(central_labels)
 
-        if classifier.has_head:
+    head_is_stale = False
+    if os.path.exists(TRAINED_HEAD_PATH):
+        import torch as _torch
+        try:
+            _ckpt = _torch.load(TRAINED_HEAD_PATH, map_location="cpu", weights_only=True)
+            head_is_stale = n_central > _ckpt.get("stats", {}).get("n_samples", 0)
+        except Exception:
+            head_is_stale = True
+
+    should_train = (
+        n_central >= 10
+        and os.path.exists(f"{emb_base}.npy")
+        and (not os.path.exists(TRAINED_HEAD_PATH) or head_is_stale)
+    )
+
+    if should_train:
+        print("  Phase 5B — Training linear classification head from central store...")
+        from vision.train_head import train_from_label_store
+        train_from_label_store(
+            sj_num=sj_num,
+            condition=label,
+            embeddings_base=emb_base,
+            out_model_path=TRAINED_HEAD_PATH,
+        )
+        if os.path.exists(TRAINED_HEAD_PATH):
+            classifier.load_head(TRAINED_HEAD_PATH)
+    elif not classifier.has_head and os.path.exists(TRAINED_HEAD_PATH):
+        classifier.load_head(TRAINED_HEAD_PATH)
+
+    if classifier.has_head:
             print("  Phase 5B — Reclassifying with newly trained head...")
             batch_results = classifier.classify_batch(crops_rgb)
             for i, res in enumerate(batch_results):
