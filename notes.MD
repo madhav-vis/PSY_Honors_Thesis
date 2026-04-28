@@ -10,6 +10,11 @@
 
 How to run the streamlit: .venv/bin/streamlit run src/dashboard.py
 
+cd /Users/madhav/PSY197B
+streamlit run src/vision/stream_annotator.py --server.port 8502
+
+
+
 * use branches for features, always do
 git status
 git add -p          # or git add <files>
