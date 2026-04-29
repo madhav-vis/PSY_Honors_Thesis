@@ -6,7 +6,8 @@ All labels from all subjects/conditions live in one CSV:
 Crop images are mirrored to a stable directory that survives pipeline re-runs:
   {PROJECT_ROOT}/data/crops/sj{sj:02d}_{condition}/
 
-This decouples labels from run directories, which get wiped on re-runs.
+Schema (v2): subject_id, condition, fixation_id, timestamp_ns,
+             filename, human_label, labeled_at, labeler_id, is_flagged
 """
 
 import os
@@ -24,8 +25,31 @@ CROPS_BASE = os.path.join(PROJECT_ROOT, "data", "crops")
 
 LABEL_COLUMNS = [
     "subject_id", "condition", "fixation_id", "timestamp_ns",
-    "filename", "human_label", "labeled_at",
+    "filename", "human_label", "labeled_at", "labeler_id", "is_flagged",
 ]
+
+# Crops with this label are excluded from model training
+FLAG_LABEL = "flagged"
+
+
+# ── Schema migration ──────────────────────────────────────────
+
+def _ensure_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Add v2 columns with defaults for rows written by older code."""
+    if df.empty:
+        return df
+    changed = False
+    if "labeler_id" not in df.columns:
+        df = df.copy()
+        df["labeler_id"] = ""
+        changed = True
+    if "is_flagged" not in df.columns:
+        if not changed:
+            df = df.copy()
+        df["is_flagged"] = False
+    df["is_flagged"] = df["is_flagged"].fillna(False).astype(bool)
+    df["labeler_id"] = df["labeler_id"].fillna("").astype(str)
+    return df
 
 
 # ── Read / Write ──────────────────────────────────────────────
@@ -35,7 +59,7 @@ def load_labels() -> pd.DataFrame:
     if os.path.exists(LABELS_CSV):
         df = pd.read_csv(LABELS_CSV)
         df["subject_id"] = df["subject_id"].astype(int)
-        return df
+        return _ensure_schema(df)
     return pd.DataFrame(columns=LABEL_COLUMNS)
 
 
@@ -54,8 +78,35 @@ def load_labels_for(sj_num: int, condition: str) -> pd.DataFrame:
     ].reset_index(drop=True)
 
 
-def append_label(sj_num: int, condition: str, fixation_id,
-                 timestamp_ns, filename: str, human_label: str) -> None:
+def load_trainable_labels() -> pd.DataFrame:
+    """Return all labels suitable for training (exclude flagged / empty labels)."""
+    df = load_labels()
+    if df.empty:
+        return df
+    return df[
+        (~df["is_flagged"]) & (df["human_label"].notna()) & (df["human_label"] != "")
+        & (df["human_label"] != FLAG_LABEL)
+    ].reset_index(drop=True)
+
+
+def load_flagged() -> pd.DataFrame:
+    """Return all flagged / ambiguous labels awaiting review."""
+    df = load_labels()
+    if df.empty:
+        return df
+    return df[df["is_flagged"] | (df["human_label"] == FLAG_LABEL)].reset_index(drop=True)
+
+
+def append_label(
+    sj_num: int,
+    condition: str,
+    fixation_id,
+    timestamp_ns,
+    filename: str,
+    human_label: str,
+    labeler_id: str = "",
+    is_flagged: bool = False,
+) -> None:
     """Append one label row (load → concat → save)."""
     df = load_labels()
     new_row = pd.DataFrame([{
@@ -66,14 +117,18 @@ def append_label(sj_num: int, condition: str, fixation_id,
         "filename": filename,
         "human_label": human_label,
         "labeled_at": datetime.now().isoformat(timespec="seconds"),
+        "labeler_id": str(labeler_id).strip(),
+        "is_flagged": bool(is_flagged),
     }])
     save_labels(pd.concat([df, new_row], ignore_index=True))
 
 
-def remove_last_label(sj_num: int, condition: str) -> bool:
-    """Remove most recent label for a subject/condition. Returns True if removed."""
+def remove_last_label(sj_num: int, condition: str, labeler_id: str = "") -> bool:
+    """Remove most recent label for a subject/condition (+optional labeler). Returns True if removed."""
     df = load_labels()
     mask = (df["subject_id"] == int(sj_num)) & (df["condition"] == condition)
+    if labeler_id:
+        mask &= df["labeler_id"] == labeler_id
     indices = df[mask].index
     if len(indices) == 0:
         return False
@@ -81,9 +136,32 @@ def remove_last_label(sj_num: int, condition: str) -> bool:
     return True
 
 
-def label_counts() -> pd.DataFrame:
-    """Per-category counts across all subjects. Returns DataFrame[category, count]."""
+def relabel(sj_num: int, condition: str, filename: str,
+            new_label: str, labeler_id: str = "") -> bool:
+    """Update label for a specific crop (most recent row matching filename + labeler)."""
     df = load_labels()
+    mask = (
+        (df["subject_id"] == int(sj_num))
+        & (df["condition"] == condition)
+        & (df["filename"] == filename)
+    )
+    if labeler_id:
+        mask &= df["labeler_id"] == labeler_id
+    indices = df[mask].index
+    if len(indices) == 0:
+        return False
+    df.loc[indices[-1], "human_label"] = new_label
+    df.loc[indices[-1], "is_flagged"] = False
+    df.loc[indices[-1], "labeled_at"] = datetime.now().isoformat(timespec="seconds")
+    save_labels(df)
+    return True
+
+
+# ── Counts / summaries ────────────────────────────────────────
+
+def label_counts() -> pd.DataFrame:
+    """Per-category counts across all subjects (trainable labels only)."""
+    df = load_trainable_labels()
     if df.empty:
         return pd.DataFrame(columns=["human_label", "count"])
     return (
@@ -94,8 +172,8 @@ def label_counts() -> pd.DataFrame:
 
 
 def subject_condition_counts() -> pd.DataFrame:
-    """Label counts grouped by subject + condition."""
-    df = load_labels()
+    """Label counts grouped by subject + condition (trainable labels only)."""
+    df = load_trainable_labels()
     if df.empty:
         return pd.DataFrame(columns=["subject_id", "condition", "count"])
     return (
@@ -104,6 +182,143 @@ def subject_condition_counts() -> pd.DataFrame:
         .reset_index(name="count")
         .sort_values(["subject_id", "condition"])
     )
+
+
+def labeler_ids() -> list[str]:
+    """Return sorted list of unique non-empty labeler IDs."""
+    df = load_labels()
+    if df.empty:
+        return []
+    ids = df["labeler_id"].dropna().astype(str).str.strip()
+    return sorted(i for i in ids.unique() if i)
+
+
+# ── Inter-rater reliability ───────────────────────────────────
+
+def inter_rater_overlaps() -> pd.DataFrame:
+    """Return crops labeled by 2+ distinct labelers, paired for comparison.
+
+    Columns: subject_id, condition, filename, labeler_1, label_1, labeler_2, label_2, agree
+    """
+    df = load_labels()
+    if df.empty:
+        return pd.DataFrame()
+
+    df = df[df["labeler_id"].str.strip() != ""].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for (sj, cond, fname), group in df.groupby(["subject_id", "condition", "filename"]):
+        unique_labelers = group["labeler_id"].unique()
+        if len(unique_labelers) < 2:
+            continue
+        sorted_group = group.sort_values("labeler_id")
+        labeler_list = list(sorted_group.iterrows())
+        for i in range(len(labeler_list)):
+            for j in range(i + 1, len(labeler_list)):
+                _, r1 = labeler_list[i]
+                _, r2 = labeler_list[j]
+                rows.append({
+                    "subject_id": sj,
+                    "condition": cond,
+                    "filename": fname,
+                    "labeler_1": r1["labeler_id"],
+                    "label_1": r1["human_label"],
+                    "labeler_2": r2["labeler_id"],
+                    "label_2": r2["human_label"],
+                    "agree": r1["human_label"] == r2["human_label"],
+                })
+    return pd.DataFrame(rows)
+
+
+def cohens_kappa_matrix() -> pd.DataFrame:
+    """Compute Cohen's Kappa between every pair of labelers with overlapping annotations.
+
+    Returns DataFrame: labeler_1, labeler_2, kappa, n_overlap, pct_agree
+    """
+    try:
+        from sklearn.metrics import cohen_kappa_score
+    except ImportError:
+        return pd.DataFrame(columns=["labeler_1", "labeler_2", "kappa", "n_overlap"])
+
+    overlaps = inter_rater_overlaps()
+    if overlaps.empty:
+        return pd.DataFrame(columns=["labeler_1", "labeler_2", "kappa", "n_overlap", "pct_agree"])
+
+    rows = []
+    for (l1, l2), group in overlaps.groupby(["labeler_1", "labeler_2"]):
+        if len(group) < 2:
+            continue
+        try:
+            kappa = cohen_kappa_score(group["label_1"], group["label_2"])
+        except Exception:
+            kappa = float("nan")
+        pct = group["agree"].mean()
+        rows.append({
+            "labeler_1": l1,
+            "labeler_2": l2,
+            "kappa": round(kappa, 3),
+            "n_overlap": len(group),
+            "pct_agree": round(pct, 3),
+        })
+    return pd.DataFrame(rows)
+
+
+# ── Data directory scanning ───────────────────────────────────
+
+def scan_data_subjects() -> list[int]:
+    """Return sorted list of subject numbers found in data/sj* directories."""
+    data_root = os.path.join(PROJECT_ROOT, "data")
+    subjects = []
+    if not os.path.isdir(data_root):
+        return subjects
+    for name in sorted(os.listdir(data_root)):
+        if name.startswith("sj") and os.path.isdir(os.path.join(data_root, name)):
+            try:
+                subjects.append(int(name[2:]))
+            except ValueError:
+                pass
+    return subjects
+
+
+def crop_status_grid() -> pd.DataFrame:
+    """Return a DataFrame showing crop counts and data availability per subject × condition.
+
+    Columns: subject_id, condition, n_crops, has_video, has_fixations, has_gaze
+    """
+    from vision.config import ET_FOLDER_MAP, get_world_video_path
+
+    all_conditions = list(ET_FOLDER_MAP.keys())
+    subjects = scan_data_subjects()
+    data_root = os.path.join(PROJECT_ROOT, "data")
+
+    rows = []
+    for sj in subjects:
+        for cond in all_conditions:
+            crop_dir = get_crop_dir(sj, cond)
+            n_crops = 0
+            if os.path.isdir(crop_dir):
+                n_crops = sum(1 for f in os.listdir(crop_dir) if f.lower().endswith(".png"))
+
+            et_folder = ET_FOLDER_MAP[cond]
+            et_dir = os.path.join(data_root, f"sj{sj:02d}", "eye", et_folder)
+            has_fixations = os.path.exists(os.path.join(et_dir, "fixations.csv"))
+            has_gaze = os.path.exists(os.path.join(et_dir, "gaze_positions.csv"))
+
+            video_path = get_world_video_path(sj, cond)
+            has_video = video_path is not None and os.path.exists(video_path)
+
+            rows.append({
+                "subject_id": sj,
+                "condition": cond,
+                "n_crops": n_crops,
+                "has_video": has_video,
+                "has_fixations": has_fixations,
+                "has_gaze": has_gaze,
+            })
+
+    return pd.DataFrame(rows)
 
 
 # ── Crop mirroring ────────────────────────────────────────────
@@ -158,7 +373,6 @@ def available_subjects_conditions() -> list[tuple[int, str]]:
             sj_num = int(parts[0][2:])
         except ValueError:
             continue
-        # Only include if there are actually PNGs
         if any(f.lower().endswith(".png") for f in os.listdir(path)):
             pairs.append((sj_num, parts[1]))
     return pairs
@@ -190,7 +404,6 @@ def migrate_existing_labels(runs_root: str) -> int:
         if not os.path.isdir(vision_root):
             continue
         for sj_cond in sorted(os.listdir(vision_root)):
-            # Parse "sj04_walk_attend" → sj_num=4, condition="walk_attend"
             parts = sj_cond.split("_", 1)
             if len(parts) != 2 or not parts[0].startswith("sj"):
                 continue
@@ -228,6 +441,8 @@ def migrate_existing_labels(runs_root: str) -> int:
                     "filename": fname,
                     "human_label": str(row.get("human_label", "")),
                     "labeled_at": mtime,
+                    "labeler_id": "",
+                    "is_flagged": False,
                 })
                 existing_keys.add(key)
 
