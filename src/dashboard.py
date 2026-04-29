@@ -193,19 +193,12 @@ if not runs:
 else:
     selected_run = st.sidebar.selectbox("Run", runs)
 
-sj_num = None
+sj_num = None  # None = "All subjects"
 subjects = []
 conditions = []
 
 if selected_run:
     subjects, conditions = find_subjects_conditions(selected_run)
-    if subjects:
-        sj_num = subjects[0] if len(subjects) == 1 else None
-    if sj_num is None:
-        import re
-        m = re.search(r"sj(\d+)", selected_run)
-        if m:
-            sj_num = int(m.group(1))
     if not conditions:
         cfg_path = os.path.join(run_dir(selected_run),
                                  "run_config_snapshot.yaml")
@@ -227,9 +220,82 @@ if selected_run:
 st.title("PSY197B")
 st.caption("Mobile EEG + Eye Tracking")
 
-if selected_run and len(subjects) > 1:
-    sj_num = st.selectbox("Subject", subjects,
-                           format_func=lambda x: f"sj{x:02d}")
+if selected_run and subjects:
+    _sj_options = ["All subjects"] + subjects
+    _sj_sel = st.selectbox(
+        "Subject",
+        _sj_options,
+        format_func=lambda x: x if isinstance(x, str) else f"sj{x:02d}",
+    )
+    sj_num = None if _sj_sel == "All subjects" else _sj_sel
+
+
+# ── Multi-subject helpers ────────────────────────────────────
+
+@st.cache_data(ttl=120)
+def _build_erp_by_cell(selected_run, sj_tuple, cond_tuple):
+    """Grand-average ERP across subjects. Returns (erp_by_cell, errors, missing)."""
+    cell_acc = {}  # cell -> {"go_list": [], "nogo_list": [], "times_ms": arr}
+    errors, missing = [], []
+    for sj in sj_tuple:
+        for cond in cond_tuple:
+            epo_path = os.path.join(
+                data_dir(selected_run),
+                f"sj{sj:02d}_{cond}_Features-epo.fif",
+            )
+            if not os.path.exists(epo_path):
+                missing.append((sj, cond))
+                continue
+            try:
+                ep = mne.read_epochs(epo_path, preload=True, verbose=False)
+                if len(ep) == 0:
+                    continue
+                ch = "Pz" if "Pz" in ep.ch_names else ep.ch_names[0]
+                chi = ep.ch_names.index(ch)
+                d = ep.get_data()
+                go_idx, nogo_idx = _go_nogo_indices_from_epochs(ep)
+                cell = _condition_grid_label(cond)
+                if cell not in cell_acc:
+                    cell_acc[cell] = {
+                        "go_list": [], "nogo_list": [],
+                        "times_ms": ep.times * 1000.0,
+                    }
+                if len(go_idx):
+                    cell_acc[cell]["go_list"].append(
+                        d[go_idx, chi, :].mean(axis=0) * 1e6
+                    )
+                if len(nogo_idx):
+                    cell_acc[cell]["nogo_list"].append(
+                        d[nogo_idx, chi, :].mean(axis=0) * 1e6
+                    )
+            except Exception as exc:
+                errors.append(f"sj{sj:02d} {cond}: {exc}")
+    erp_by_cell = {
+        cell: {
+            "times_ms": d["times_ms"],
+            "go": np.mean(d["go_list"], axis=0) if d["go_list"] else None,
+            "nogo": np.mean(d["nogo_list"], axis=0) if d["nogo_list"] else None,
+            "n_go": len(d["go_list"]),
+            "n_nogo": len(d["nogo_list"]),
+        }
+        for cell, d in cell_acc.items()
+    }
+    return erp_by_cell, errors, missing
+
+
+def _collect_beh_rows(selected_run, sj_list, conditions):
+    """Collect behavior rows across subjects and conditions."""
+    rows = []
+    for sj in sj_list:
+        for cond in conditions:
+            feat = load_csv(os.path.join(
+                data_dir(selected_run), f"sj{sj:02d}_{cond}_features.csv"
+            ))
+            row = _build_movement_behavior_rows(feat, cond)
+            if row is not None:
+                row["subject"] = f"sj{sj:02d}"
+                rows.append(row)
+    return rows
 
 
 # ── Tabs ─────────────────────────────────────────────────────
@@ -349,58 +415,29 @@ with tab_run:
 with tab_overview:
     if not selected_run:
         st.info("Select a run from the sidebar.")
-    elif not sj_num:
-        st.info("Select a subject.")
+    elif not subjects:
+        st.info("No subjects found for this run.")
     else:
-        st.header(f"Overview — sj{sj_num:02d}")
+        sj_list_ov = subjects if sj_num is None else [sj_num]
+        sj_label_ov = "All subjects" if sj_num is None else f"sj{sj_num:02d}"
+        st.header(f"Overview — {sj_label_ov}")
 
-        # ── 2×2 ERP Grid (Go vs NoGo, Attend/Unattend × Sit/Walk) ────
-        st.subheader("Go vs NoGo ERPs — Pz")
+        # ── 2×2 ERP Grid ──────────────────────────────────────────────
+        erp_label = "Grand-average Go vs NoGo ERPs — Pz" if sj_num is None else "Go vs NoGo ERPs — Pz"
+        st.subheader(erp_label)
 
-        erp_by_cell = {}
-        erp_load_errors = []
-        missing_feature_epo = []
-        for cond in conditions:
-            epo_path = os.path.join(
-                data_dir(selected_run),
-                f"sj{sj_num:02d}_{cond}_Features-epo.fif",
-            )
-            if not os.path.exists(epo_path):
-                missing_feature_epo.append((cond, epo_path))
-                continue
-            try:
-                epochs = mne.read_epochs(epo_path, preload=True, verbose=False)
-                if len(epochs) == 0:
-                    erp_load_errors.append(f"{cond}: empty Features-epo.fif")
-                    continue
-                ch = "Pz" if "Pz" in epochs.ch_names else epochs.ch_names[0]
-                ch_i = epochs.ch_names.index(ch)
-                data_ep = epochs.get_data()
-                go_idx, nogo_idx = _go_nogo_indices_from_epochs(epochs)
-                if len(go_idx) == 0 and len(nogo_idx) == 0:
-                    erp_load_errors.append(
-                        f"{cond}: no trials with trialType 10/20"
-                    )
-                    continue
-                erp_by_cell[_condition_grid_label(cond)] = {
-                    "times_ms": epochs.times * 1000.0,
-                    "go": data_ep[go_idx, ch_i, :].mean(axis=0) * 1e6 if len(go_idx) else None,
-                    "nogo": data_ep[nogo_idx, ch_i, :].mean(axis=0) * 1e6 if len(nogo_idx) else None,
-                    "n_go": int(len(go_idx)),
-                    "n_nogo": int(len(nogo_idx)),
-                }
-            except Exception as exc:
-                erp_load_errors.append(f"{cond}: {exc}")
+        erp_by_cell, erp_load_errors, missing_pairs = _build_erp_by_cell(
+            selected_run, tuple(sj_list_ov), tuple(conditions)
+        )
 
-        cell_order = ["Attend Sit", "Unattend Sit", "Attend Walk", "Unattend Walk"]
-
-        if missing_feature_epo or erp_load_errors:
+        if missing_pairs or erp_load_errors:
             with st.expander("ERP data issues", expanded=True):
-                for c, p in missing_feature_epo:
-                    st.warning(f"`{c}` — missing `{os.path.basename(p)}`")
+                for sj, cond in missing_pairs:
+                    st.warning(f"sj{sj:02d} `{cond}` — Features-epo.fif not found")
                 for msg in erp_load_errors:
                     st.warning(msg)
 
+        cell_order = ["Attend Sit", "Unattend Sit", "Attend Walk", "Unattend Walk"]
         if any(c in erp_by_cell for c in cell_order):
             fig_grid = make_subplots(
                 rows=2, cols=2,
@@ -412,6 +449,7 @@ with tab_overview:
                 "Attend Sit": (1, 1), "Unattend Sit": (1, 2),
                 "Attend Walk": (2, 1), "Unattend Walk": (2, 2),
             }
+            n_sj_label = f"n={len(sj_list_ov)} subjects" if sj_num is None else f"sj{sj_num:02d}"
             for cell, (r, c) in pos.items():
                 item = erp_by_cell.get(cell)
                 if not item:
@@ -419,14 +457,16 @@ with tab_overview:
                 if item["nogo"] is not None:
                     fig_grid.add_trace(go.Scatter(
                         x=item["times_ms"], y=item["nogo"],
-                        mode="lines", name=f"NoGo (n={item['n_nogo']})",
+                        mode="lines",
+                        name=f"NoGo ({n_sj_label})",
                         line=dict(color="#e74c3c", width=2),
                         showlegend=(cell == "Attend Sit"),
                     ), row=r, col=c)
                 if item["go"] is not None:
                     fig_grid.add_trace(go.Scatter(
                         x=item["times_ms"], y=item["go"],
-                        mode="lines", name=f"Go (n={item['n_go']})",
+                        mode="lines",
+                        name=f"Go ({n_sj_label})",
                         line=dict(color="#2980b9", width=2),
                         showlegend=(cell == "Attend Sit"),
                     ), row=r, col=c)
@@ -443,7 +483,8 @@ with tab_overview:
                 legend=dict(orientation="h", y=-0.08),
             )
             st.plotly_chart(fig_grid, use_container_width=True)
-            st.caption("Shaded band = P300 window (250–500 ms). Dashed line = stimulus onset.")
+            cap = "Grand average across all subjects. " if sj_num is None else ""
+            st.caption(cap + "Shaded band = P300 window (250–500 ms). Dashed line = stimulus onset.")
         else:
             st.info("No ERP data found. Run the full pipeline first (EEG preprocess → fusion → extract_features).")
 
@@ -455,386 +496,445 @@ with tab_overview:
 # ════════════════════════════════════════════════════════════
 
 with tab_et:
-    if not selected_run or not sj_num:
-        st.info("Select a run and subject.")
+    if not selected_run or not subjects:
+        st.info("Select a run.")
     else:
-        st.header(f"Eye Tracking — sj{sj_num:02d}")
+        sj_list_et = subjects if sj_num is None else [sj_num]
+        sj_label_et = "All subjects" if sj_num is None else f"sj{sj_num:02d}"
+        st.header(f"Eye Tracking — {sj_label_et}")
 
         et_map = _et_folder_map()
         data_root = _project_data_root()
         n_conds = len(conditions)
 
-        # Build paths & load data for every condition up front
-        _et_eye_dirs = {}
-        _et_gaze = {}
-        _et_fix = {}
-        _et_euc = {}
-        for _c in conditions:
-            _dir = os.path.join(data_root, f"sj{sj_num:02d}", "eye",
-                                et_map.get(_c, ""))
-            _et_eye_dirs[_c] = _dir
-            _et_gaze[_c] = et_viz.load_gaze_for_viz(
-                os.path.join(_dir, "gaze_positions.csv"))
-            _et_fix[_c] = et_viz.load_fixations(
-                os.path.join(_dir, "fixations.csv"))
-            _et_euc[_c] = et_viz.compute_euclidean(
-                os.path.join(_dir, "gaze_positions.csv"))
-
-        # ── 1. Euclidean Distance ─────────────────────────────
-        euc_valid = {c: d for c, d in _et_euc.items() if d is not None}
-        if euc_valid:
-            st.subheader("Euclidean Distance")
-
-            # Summary metrics
-            _m_cols = st.columns(n_conds)
-            for i, (cond, d) in enumerate(euc_valid.items()):
-                _m_cols[i].metric(
-                    cond,
-                    f"{d['total_distance']:,.0f} px",
-                    help=f"Total gaze path length over {d['duration_s']:.0f}s",
+        # ── All-subjects aggregate view ────────────────────────
+        if sj_num is None:
+            st.subheader("Behavior Summary — averaged across subjects")
+            _all_beh = _collect_beh_rows(selected_run, sj_list_et, conditions)
+            if _all_beh:
+                _beh_df = pd.DataFrame(_all_beh)
+                _beh_agg = (
+                    _beh_df.groupby("movement", as_index=False)[["pCorrect", "pError"]]
+                    .mean()
+                    .rename(columns={"movement": "Movement"})
                 )
-            _m_cols2 = st.columns(n_conds)
-            for i, (cond, d) in enumerate(euc_valid.items()):
-                _m_cols2[i].metric(
-                    f"{cond} — rate",
-                    f"{d['mean_rate']:,.0f} px/s",
-                    help="Mean displacement per second",
-                )
+                _bc1, _bc2 = st.columns(2)
+                with _bc1:
+                    _fh = px.bar(_beh_agg, x="Movement", y="pCorrect",
+                                 title="Hits (pCorrect)", range_y=[0, 1],
+                                 color_discrete_sequence=["#1f77b4"])
+                    _fh.update_layout(showlegend=False, height=330)
+                    st.plotly_chart(_fh, use_container_width=True)
+                with _bc2:
+                    _fe = px.bar(_beh_agg, x="Movement", y="pError",
+                                 title="Commission Errors (pError)", range_y=[0, 1],
+                                 color_discrete_sequence=["#1f77b4"])
+                    _fe.update_layout(showlegend=False, height=330)
+                    st.plotly_chart(_fe, use_container_width=True)
+                with st.expander("Per-subject breakdown"):
+                    st.dataframe(_beh_df, hide_index=True, use_container_width=True)
 
-            # Cumulative distance overlay (the key comparison plot)
-            st.plotly_chart(
-                et_viz.fig_cumulative_distance(euc_valid),
-                width="stretch",
-            )
-            st.caption(
-                "Slope = rate of eye movement. "
-                "Steeper = more gaze displacement."
-            )
-
-            # Raw distance + rolling average side by side
-            _euc_cols = st.columns(n_conds)
-            for i, cond in enumerate(conditions):
-                if cond not in euc_valid:
-                    continue
-                with _euc_cols[i]:
-                    st.markdown(f"**{cond}**")
-                    st.plotly_chart(
-                        et_viz.fig_raw_distance(euc_valid[cond]),
-                        width="stretch",
-                    )
-                    st.plotly_chart(
-                        et_viz.fig_rolling_distance(euc_valid[cond]),
-                        width="stretch",
-                    )
-
-        # ── 1b. Optical axis + IMU + pupil (aligned) ─────────
-        st.markdown("---")
-        st.subheader("Eye vs head vs pupil (same time axis)")
-        st.caption(
-            "Compare **optical-axis rotation speed** (eyes) with **gyro magnitude** "
-            "(head) and **pupil size** (arousal / effort). "
-            "High eye speed with low gyro often suggests scanning while the head is still."
-        )
-        _tri_cond = conditions[0] if len(conditions) == 1 else st.selectbox(
-            "Condition (3-panel physiology)",
-            conditions,
-            key="triptych_cond",
-        )
-        _tri_dir = _et_eye_dirs.get(_tri_cond, "")
-        _tri_series = (
-            et_viz.build_axis_gyro_pupil_series(_tri_dir)
-            if _tri_dir and os.path.isdir(_tri_dir)
-            else None
-        )
-        if _tri_series is not None:
-            _et_prepro_path = os.path.join(
-                data_dir(selected_run),
-                f"sj{sj_num:02d}_{_tri_cond}_ET_Prepro1.csv",
-            )
-            _et_prepro = load_csv(_et_prepro_path)
-            _trigger_rel = None
-            _x_for_plot = _tri_series["t_s"]
-            _x_label = "Time (s) from first 3d eye sample"
-
-            _vision_rel = None
-            _vr_path = os.path.join(
-                vision_dir(selected_run, sj_num, _tri_cond),
-                f"sj{sj_num:02d}_{_tri_cond}_vision_results.csv",
-            )
-            _vision_results = load_csv(_vr_path)
-
-            if (
-                _et_prepro is not None
-                and "trigger_time" in _et_prepro.columns
-                and _et_prepro["trigger_time"].notna().any()
-            ):
-                _trigger_abs = (
-                    _et_prepro["trigger_time"].dropna().astype(float).to_numpy()
-                )
-                _t0_trig = float(_trigger_abs.min())
-                _x_for_plot = _tri_series["t_abs_s"] - _t0_trig
-                _x_label = "Behavior-aligned time (s from first trial trigger)"
-                _trigger_rel = _trigger_abs - _t0_trig
-
-                # Vision timestamps are stored relative to gaze start.
-                # Convert to absolute with gaze start, then to trigger-relative.
-                if (
-                    _vision_results is not None
-                    and "timestamp_s" in _vision_results.columns
-                    and _vision_results["timestamp_s"].notna().any()
-                ):
-                    _gaze_t0 = load_first_timestamp_s(
-                        os.path.join(_tri_dir, "gaze_positions.csv")
-                    )
-                    if _gaze_t0 is not None:
-                        _vision_abs = _gaze_t0 + _vision_results["timestamp_s"].astype(float).to_numpy()
-                        _vision_rel = _vision_abs - _t0_trig
-
-            st.plotly_chart(
-                et_viz.fig_axis_gyro_pupil_triptych(
-                    _tri_series,
-                    title=f"sj{sj_num:02d} · {_tri_cond}",
-                    x_s=_x_for_plot,
-                    x_label=_x_label,
-                    trigger_s=_trigger_rel,
-                    vision_s=_vision_rel,
-                ),
-                width="stretch",
-            )
-            if _trigger_rel is not None:
-                st.caption(
-                    "Dotted vertical lines = behavioral trial triggers. "
-                    "Yellow dots on panel 1 = vision fixation timestamps."
-                )
+            st.markdown("---")
+            st.subheader("Physiology Summary — all subjects")
+            _all_phys = []
+            for _sj in sj_list_et:
+                for _c in conditions:
+                    _dir = os.path.join(data_root, f"sj{_sj:02d}", "eye",
+                                        et_map.get(_c, ""))
+                    _s = et_viz.build_axis_gyro_pupil_series(_dir)
+                    if _s is None:
+                        continue
+                    _mv, _att = _parse_condition_parts(_c)
+                    _all_phys.append({
+                        "Subject": f"sj{_sj:02d}",
+                        "Condition": _c,
+                        "Movement": _mv.title(),
+                        "Attention": _att.title(),
+                        "Pupil (mm)": round(float(np.nanmedian(_s["pupil_mm"])), 3),
+                        "Eye speed (°/s)": round(float(np.nanmedian(_s["omega_eye_deg_s"])), 2),
+                        "Head gyro (°/s)": round(float(np.nanmedian(_s["gyro_mag_deg_s"])), 2),
+                    })
+            if _all_phys:
+                _phys_df = pd.DataFrame(_all_phys)
+                st.dataframe(_phys_df, hide_index=True, use_container_width=True)
+                st.caption("Median values per subject per condition. Select a specific subject for heatmaps, triptych, and session details.")
             else:
+                st.info("No 3d_eye_states.csv found for any subject.")
+
+        # ── Single-subject detailed view ───────────────────────
+        if sj_num is not None:
+
+            # Build paths & load data for every condition up front
+            _et_eye_dirs = {}
+            _et_gaze = {}
+            _et_fix = {}
+            _et_euc = {}
+            for _c in conditions:
+                _dir = os.path.join(data_root, f"sj{sj_num:02d}", "eye",
+                                    et_map.get(_c, ""))
+                _et_eye_dirs[_c] = _dir
+                _et_gaze[_c] = et_viz.load_gaze_for_viz(
+                    os.path.join(_dir, "gaze_positions.csv"))
+                _et_fix[_c] = et_viz.load_fixations(
+                    os.path.join(_dir, "fixations.csv"))
+                _et_euc[_c] = et_viz.compute_euclidean(
+                    os.path.join(_dir, "gaze_positions.csv"))
+
+            # ── 1. Euclidean Distance ─────────────────────────────
+            euc_valid = {c: d for c, d in _et_euc.items() if d is not None}
+            if euc_valid:
+                st.subheader("Euclidean Distance")
+
+                # Summary metrics
+                _m_cols = st.columns(n_conds)
+                for i, (cond, d) in enumerate(euc_valid.items()):
+                    _m_cols[i].metric(
+                        cond,
+                        f"{d['total_distance']:,.0f} px",
+                        help=f"Total gaze path length over {d['duration_s']:.0f}s",
+                    )
+                _m_cols2 = st.columns(n_conds)
+                for i, (cond, d) in enumerate(euc_valid.items()):
+                    _m_cols2[i].metric(
+                        f"{cond} — rate",
+                        f"{d['mean_rate']:,.0f} px/s",
+                        help="Mean displacement per second",
+                    )
+
+                # Cumulative distance overlay (the key comparison plot)
+                st.plotly_chart(
+                    et_viz.fig_cumulative_distance(euc_valid),
+                    width="stretch",
+                )
                 st.caption(
-                    "Behavior trigger table not found for this run/condition, "
-                    "so this view uses raw session time."
+                    "Slope = rate of eye movement. "
+                    "Steeper = more gaze displacement."
                 )
-        else:
-            st.info(
-                f"No `3d_eye_states.csv` in `{_tri_dir or '(unknown)'}` — "
-                "needed for optical axes and pupil."
-            )
 
-        with st.expander("How this plot is computed (blinks, pipeline, …)", expanded=False):
-            st.markdown(
-                """
-**Panel 1 — Eye movement intensity (optical axis)**  
-- Source: `3d_eye_states.csv` (Pupil Labs export).  
-- Left and right optical-axis vectors are **row-normalized** to unit vectors **û**.  
-- At each time sample we estimate **|dû/dt|** using `numpy.gradient` along the
-  session clock (uneven spacing is allowed). That norm is the instantaneous
-  **angular speed of the gaze direction** in space (deg/s).  
-- The trace is the **mean of left and right** angular speeds.  
-- This is **not** the same as screen-plane Euclidean distance from
-  `gaze_positions.csv` (the plots above): axis motion is 3-D gaze direction;
-  screen metrics mix projection and head movement.
-
-**Panel 2 — Head movement intensity**  
-- Source: `imu.csv` gyro columns (`gyro x/y/z [deg/s]`).  
-- Plotted value: **√(gx² + gy² + gz²)** in deg/s.  
-- IMU timestamps rarely match eye samples; we **linearly interpolate** gyro
-  magnitude onto the eye time grid (same **t = 0** as the first row of
-  `3d_eye_states.csv`).
-
-**Panel 3 — Pupil (arousal / load)**  
-- **Average of left and right** `pupil diameter [mm]` from the same file as
-  panel 1. **Not** blink-rejected here: during blinks, diameters often go to
-  junk values; interpret dips with the blink bands or with trial-level blink
-  flags from preprocessing.
-
-**Behavior + vision alignment (for long recordings)**  
-- If `ET_Prepro1.csv` is available, all three traces are re-plotted on a
-  **behavior-anchored axis**: seconds from the first trial trigger.  
-- Dotted vertical lines mark every behavioral trigger (`trigger_time`).  
-- Vision fixation timestamps (`vision_results.csv`) are converted from their
-  gaze-relative clock to that same trigger-aligned axis and shown as yellow dots.
-
-**Gray vertical bands — blink windows**  
-- The dashboard infers blink-like periods from eyelid aperture in
-  `3d_eye_states.csv` (when either `eyelid aperture left/right [mm]` drops
-  below ~1 mm).  
-- **Separate from this figure:** the main pipeline (`et_preprocess` /
-  `et_timeseries`) computes epoch-level blink flags independently; those are the
-  `has_blink` values shown in **Session Details**.
-
-**Performance**  
-- Long sessions are **decimated** (~25k points max) for responsiveness; totals
-  and shapes are unchanged in the raw files.
-                """
-            )
-
-        # ── 1c. Sit vs walk physiology + behavior summary ───────────
-        st.markdown("---")
-        st.subheader("Sit vs Walk Summary")
-
-        # Physiology summary from 3d_eye_states + imu.
-        phys_rows = []
-        for _c in conditions:
-            _s = et_viz.build_axis_gyro_pupil_series(_et_eye_dirs.get(_c, ""))
-            if _s is None:
-                continue
-            _mv, _att = _parse_condition_parts(_c)
-            phys_rows.append({
-                "Condition": _c,
-                "Movement": _mv.title(),
-                "Attention": _att.title(),
-                "Pupil (mm)": float(np.nanmedian(_s["pupil_mm"])),
-                "Eye speed (deg/s)": float(np.nanmedian(_s["omega_eye_deg_s"])),
-                "Gyro (deg/s)": float(np.nanmedian(_s["gyro_mag_deg_s"])),
-            })
-        if phys_rows:
-            st.dataframe(pd.DataFrame(phys_rows), width="stretch", hide_index=True)
-        else:
-            st.info("No `3d_eye_states.csv` available for current conditions.")
-
-        # Behavior summary bars (no error bars): pCorrect (Go HIT rate), pError (NoGo CE rate).
-        beh_rows = []
-        for _c in conditions:
-            _feat = load_csv(
-                os.path.join(data_dir(selected_run), f"sj{sj_num:02d}_{_c}_features.csv")
-            )
-            _row = _build_movement_behavior_rows(_feat, _c)
-            if _row is not None:
-                beh_rows.append(_row)
-        if beh_rows:
-            _beh = pd.DataFrame(beh_rows)
-            _agg = (
-                _beh.groupby("movement", as_index=False)[["pCorrect", "pError"]]
-                .mean()
-                .rename(columns={"movement": "Movement"})
-            )
-            c1, c2 = st.columns(2)
-            with c1:
-                fig_hit = px.bar(
-                    _agg,
-                    x="Movement",
-                    y="pCorrect",
-                    title="Hits (pCorrect)",
-                    color_discrete_sequence=["#1f77b4"],
-                    range_y=[0, 1],
-                )
-                fig_hit.update_layout(showlegend=False, height=330)
-                st.plotly_chart(fig_hit, width="stretch")
-            with c2:
-                fig_ce = px.bar(
-                    _agg,
-                    x="Movement",
-                    y="pError",
-                    title="Commission Errors (pError)",
-                    color_discrete_sequence=["#1f77b4"],
-                    range_y=[0, 1],
-                )
-                fig_ce.update_layout(showlegend=False, height=330)
-                st.plotly_chart(fig_ce, width="stretch")
-
-        # ── 2. Spatial Analysis (side by side) ────────────────
-        if any(_et_gaze[c] is not None for c in conditions):
-            st.markdown("---")
-            st.subheader("Gaze Heatmap")
-            _hm_cols = st.columns(n_conds)
-            for i, cond in enumerate(conditions):
-                with _hm_cols[i]:
-                    st.markdown(f"**{cond}**")
-                    if _et_gaze[cond] is not None:
-                        st.plotly_chart(
-                            et_viz.fig_heatmap(_et_gaze[cond]),
-                            width="stretch",
-                        )
-
-        if any(_et_fix[c] is not None for c in conditions):
-            st.markdown("---")
-            st.subheader("Scanpath")
-            _sp_cols = st.columns(n_conds)
-            for i, cond in enumerate(conditions):
-                with _sp_cols[i]:
-                    st.markdown(f"**{cond}**")
-                    if _et_fix[cond] is not None:
-                        st.plotly_chart(
-                            et_viz.fig_scanpath(_et_fix[cond]),
-                            width="stretch",
-                        )
-
-            st.subheader("Fixation Map")
-            _fm_cols = st.columns(n_conds)
-            for i, cond in enumerate(conditions):
-                with _fm_cols[i]:
-                    st.markdown(f"**{cond}**")
-                    if _et_fix[cond] is not None:
-                        st.plotly_chart(
-                            et_viz.fig_fixation_map(_et_fix[cond]),
-                            width="stretch",
-                        )
-
-        # ── 3. Space-Time Cube (side by side, collapsed) ──────
-        if any(_et_gaze[c] is not None for c in conditions):
-            st.markdown("---")
-            with st.expander("Space-Time Cube (3D)", expanded=False):
-                _st_cols = st.columns(n_conds)
+                # Raw distance + rolling average side by side
+                _euc_cols = st.columns(n_conds)
                 for i, cond in enumerate(conditions):
-                    with _st_cols[i]:
+                    if cond not in euc_valid:
+                        continue
+                    with _euc_cols[i]:
+                        st.markdown(f"**{cond}**")
+                        st.plotly_chart(
+                            et_viz.fig_raw_distance(euc_valid[cond]),
+                            width="stretch",
+                        )
+                        st.plotly_chart(
+                            et_viz.fig_rolling_distance(euc_valid[cond]),
+                            width="stretch",
+                        )
+
+            # ── 1b. Optical axis + IMU + pupil (aligned) ─────────
+            st.markdown("---")
+            st.subheader("Eye vs head vs pupil (same time axis)")
+            st.caption(
+                "Compare **optical-axis rotation speed** (eyes) with **gyro magnitude** "
+                "(head) and **pupil size** (arousal / effort). "
+                "High eye speed with low gyro often suggests scanning while the head is still."
+            )
+            _tri_cond = conditions[0] if len(conditions) == 1 else st.selectbox(
+                "Condition (3-panel physiology)",
+                conditions,
+                key="triptych_cond",
+            )
+            _tri_dir = _et_eye_dirs.get(_tri_cond, "")
+            _tri_series = (
+                et_viz.build_axis_gyro_pupil_series(_tri_dir)
+                if _tri_dir and os.path.isdir(_tri_dir)
+                else None
+            )
+            if _tri_series is not None:
+                _et_prepro_path = os.path.join(
+                    data_dir(selected_run),
+                    f"sj{sj_num:02d}_{_tri_cond}_ET_Prepro1.csv",
+                )
+                _et_prepro = load_csv(_et_prepro_path)
+                _trigger_rel = None
+                _x_for_plot = _tri_series["t_s"]
+                _x_label = "Time (s) from first 3d eye sample"
+
+                _vision_rel = None
+                _vr_path = os.path.join(
+                    vision_dir(selected_run, sj_num, _tri_cond),
+                    f"sj{sj_num:02d}_{_tri_cond}_vision_results.csv",
+                )
+                _vision_results = load_csv(_vr_path)
+
+                if (
+                    _et_prepro is not None
+                    and "trigger_time" in _et_prepro.columns
+                    and _et_prepro["trigger_time"].notna().any()
+                ):
+                    _trigger_abs = (
+                        _et_prepro["trigger_time"].dropna().astype(float).to_numpy()
+                    )
+                    _t0_trig = float(_trigger_abs.min())
+                    _x_for_plot = _tri_series["t_abs_s"] - _t0_trig
+                    _x_label = "Behavior-aligned time (s from first trial trigger)"
+                    _trigger_rel = _trigger_abs - _t0_trig
+
+                    # Vision timestamps are stored relative to gaze start.
+                    # Convert to absolute with gaze start, then to trigger-relative.
+                    if (
+                        _vision_results is not None
+                        and "timestamp_s" in _vision_results.columns
+                        and _vision_results["timestamp_s"].notna().any()
+                    ):
+                        _gaze_t0 = load_first_timestamp_s(
+                            os.path.join(_tri_dir, "gaze_positions.csv")
+                        )
+                        if _gaze_t0 is not None:
+                            _vision_abs = _gaze_t0 + _vision_results["timestamp_s"].astype(float).to_numpy()
+                            _vision_rel = _vision_abs - _t0_trig
+
+                st.plotly_chart(
+                    et_viz.fig_axis_gyro_pupil_triptych(
+                        _tri_series,
+                        title=f"sj{sj_num:02d} · {_tri_cond}",
+                        x_s=_x_for_plot,
+                        x_label=_x_label,
+                        trigger_s=_trigger_rel,
+                        vision_s=_vision_rel,
+                    ),
+                    width="stretch",
+                )
+                if _trigger_rel is not None:
+                    st.caption(
+                        "Dotted vertical lines = behavioral trial triggers. "
+                        "Yellow dots on panel 1 = vision fixation timestamps."
+                    )
+                else:
+                    st.caption(
+                        "Behavior trigger table not found for this run/condition, "
+                        "so this view uses raw session time."
+                    )
+            else:
+                st.info(
+                    f"No `3d_eye_states.csv` in `{_tri_dir or '(unknown)'}` — "
+                    "needed for optical axes and pupil."
+                )
+
+            with st.expander("How this plot is computed (blinks, pipeline, …)", expanded=False):
+                st.markdown(
+                    """
+    **Panel 1 — Eye movement intensity (optical axis)**  
+    - Source: `3d_eye_states.csv` (Pupil Labs export).  
+    - Left and right optical-axis vectors are **row-normalized** to unit vectors **û**.  
+    - At each time sample we estimate **|dû/dt|** using `numpy.gradient` along the
+      session clock (uneven spacing is allowed). That norm is the instantaneous
+      **angular speed of the gaze direction** in space (deg/s).  
+    - The trace is the **mean of left and right** angular speeds.  
+    - This is **not** the same as screen-plane Euclidean distance from
+      `gaze_positions.csv` (the plots above): axis motion is 3-D gaze direction;
+      screen metrics mix projection and head movement.
+
+    **Panel 2 — Head movement intensity**  
+    - Source: `imu.csv` gyro columns (`gyro x/y/z [deg/s]`).  
+    - Plotted value: **√(gx² + gy² + gz²)** in deg/s.  
+    - IMU timestamps rarely match eye samples; we **linearly interpolate** gyro
+      magnitude onto the eye time grid (same **t = 0** as the first row of
+      `3d_eye_states.csv`).
+
+    **Panel 3 — Pupil (arousal / load)**  
+    - **Average of left and right** `pupil diameter [mm]` from the same file as
+      panel 1. **Not** blink-rejected here: during blinks, diameters often go to
+      junk values; interpret dips with the blink bands or with trial-level blink
+      flags from preprocessing.
+
+    **Behavior + vision alignment (for long recordings)**  
+    - If `ET_Prepro1.csv` is available, all three traces are re-plotted on a
+      **behavior-anchored axis**: seconds from the first trial trigger.  
+    - Dotted vertical lines mark every behavioral trigger (`trigger_time`).  
+    - Vision fixation timestamps (`vision_results.csv`) are converted from their
+      gaze-relative clock to that same trigger-aligned axis and shown as yellow dots.
+
+    **Gray vertical bands — blink windows**  
+    - The dashboard infers blink-like periods from eyelid aperture in
+      `3d_eye_states.csv` (when either `eyelid aperture left/right [mm]` drops
+      below ~1 mm).  
+    - **Separate from this figure:** the main pipeline (`et_preprocess` /
+      `et_timeseries`) computes epoch-level blink flags independently; those are the
+      `has_blink` values shown in **Session Details**.
+
+    **Performance**  
+    - Long sessions are **decimated** (~25k points max) for responsiveness; totals
+      and shapes are unchanged in the raw files.
+                    """
+                )
+
+            # ── 1c. Sit vs walk physiology + behavior summary ───────────
+            st.markdown("---")
+            st.subheader("Sit vs Walk Summary")
+
+            # Physiology summary from 3d_eye_states + imu.
+            phys_rows = []
+            for _c in conditions:
+                _s = et_viz.build_axis_gyro_pupil_series(_et_eye_dirs.get(_c, ""))
+                if _s is None:
+                    continue
+                _mv, _att = _parse_condition_parts(_c)
+                phys_rows.append({
+                    "Condition": _c,
+                    "Movement": _mv.title(),
+                    "Attention": _att.title(),
+                    "Pupil (mm)": float(np.nanmedian(_s["pupil_mm"])),
+                    "Eye speed (deg/s)": float(np.nanmedian(_s["omega_eye_deg_s"])),
+                    "Gyro (deg/s)": float(np.nanmedian(_s["gyro_mag_deg_s"])),
+                })
+            if phys_rows:
+                st.dataframe(pd.DataFrame(phys_rows), width="stretch", hide_index=True)
+            else:
+                st.info("No `3d_eye_states.csv` available for current conditions.")
+
+            # Behavior summary bars (no error bars): pCorrect (Go HIT rate), pError (NoGo CE rate).
+            beh_rows = []
+            for _c in conditions:
+                _feat = load_csv(
+                    os.path.join(data_dir(selected_run), f"sj{sj_num:02d}_{_c}_features.csv")
+                )
+                _row = _build_movement_behavior_rows(_feat, _c)
+                if _row is not None:
+                    beh_rows.append(_row)
+            if beh_rows:
+                _beh = pd.DataFrame(beh_rows)
+                _agg = (
+                    _beh.groupby("movement", as_index=False)[["pCorrect", "pError"]]
+                    .mean()
+                    .rename(columns={"movement": "Movement"})
+                )
+                c1, c2 = st.columns(2)
+                with c1:
+                    fig_hit = px.bar(
+                        _agg,
+                        x="Movement",
+                        y="pCorrect",
+                        title="Hits (pCorrect)",
+                        color_discrete_sequence=["#1f77b4"],
+                        range_y=[0, 1],
+                    )
+                    fig_hit.update_layout(showlegend=False, height=330)
+                    st.plotly_chart(fig_hit, width="stretch")
+                with c2:
+                    fig_ce = px.bar(
+                        _agg,
+                        x="Movement",
+                        y="pError",
+                        title="Commission Errors (pError)",
+                        color_discrete_sequence=["#1f77b4"],
+                        range_y=[0, 1],
+                    )
+                    fig_ce.update_layout(showlegend=False, height=330)
+                    st.plotly_chart(fig_ce, width="stretch")
+
+            # ── 2. Spatial Analysis (side by side) ────────────────
+            if any(_et_gaze[c] is not None for c in conditions):
+                st.markdown("---")
+                st.subheader("Gaze Heatmap")
+                _hm_cols = st.columns(n_conds)
+                for i, cond in enumerate(conditions):
+                    with _hm_cols[i]:
                         st.markdown(f"**{cond}**")
                         if _et_gaze[cond] is not None:
                             st.plotly_chart(
-                                et_viz.fig_spacetime_cube(_et_gaze[cond]),
+                                et_viz.fig_heatmap(_et_gaze[cond]),
                                 width="stretch",
                             )
 
-        # ── 4. Per-condition details ──────────────────────────
-        st.markdown("---")
-        st.subheader("Session Details")
-        for _et_cond in conditions:
-            with st.expander(_et_cond, expanded=False):
-                gaze_img = os.path.join(
-                    plots_dir(selected_run),
-                    f"sj{sj_num:02d}_L1_gaze_xy_pupil_{_et_cond}.png",
-                )
-                if os.path.exists(gaze_img):
-                    st.image(gaze_img, width="stretch",
-                             caption="Full-Session Gaze Trace")
+            if any(_et_fix[c] is not None for c in conditions):
+                st.markdown("---")
+                st.subheader("Scanpath")
+                _sp_cols = st.columns(n_conds)
+                for i, cond in enumerate(conditions):
+                    with _sp_cols[i]:
+                        st.markdown(f"**{cond}**")
+                        if _et_fix[cond] is not None:
+                            st.plotly_chart(
+                                et_viz.fig_scanpath(_et_fix[cond]),
+                                width="stretch",
+                            )
 
-                traj_img = os.path.join(
-                    plots_dir(selected_run),
-                    f"sj{sj_num:02d}_L_gaze_trajectories_{_et_cond}.png",
-                )
-                if os.path.exists(traj_img):
-                    st.image(traj_img, width="stretch",
-                             caption="Gaze Trajectories by Outcome")
+                st.subheader("Fixation Map")
+                _fm_cols = st.columns(n_conds)
+                for i, cond in enumerate(conditions):
+                    with _fm_cols[i]:
+                        st.markdown(f"**{cond}**")
+                        if _et_fix[cond] is not None:
+                            st.plotly_chart(
+                                et_viz.fig_fixation_map(_et_fix[cond]),
+                                width="stretch",
+                            )
 
-                et_info_path = os.path.join(
-                    data_dir(selected_run),
-                    f"sj{sj_num:02d}_{_et_cond}_et_tensor_info.json",
-                )
-                if os.path.exists(et_info_path):
-                    with open(et_info_path) as f:
-                        et_info = json.load(f)
-                    _c1, _c2, _c3 = st.columns(3)
-                    shape = et_info.get("shape", [])
-                    _c1.metric("Shape", f"{shape}")
-                    _c2.metric("Channels",
-                               ", ".join(et_info.get("channel_names", [])))
-                    n_failed = len(et_info.get("failed_trials", []))
-                    _c3.metric("Failed Trials", n_failed)
-                    st.caption(
-                        f"Epochs with blinks: "
-                        f"{sum(et_info.get('has_blink', []))}"
+            # ── 3. Space-Time Cube (side by side, collapsed) ──────
+            if any(_et_gaze[c] is not None for c in conditions):
+                st.markdown("---")
+                with st.expander("Space-Time Cube (3D)", expanded=False):
+                    _st_cols = st.columns(n_conds)
+                    for i, cond in enumerate(conditions):
+                        with _st_cols[i]:
+                            st.markdown(f"**{cond}**")
+                            if _et_gaze[cond] is not None:
+                                st.plotly_chart(
+                                    et_viz.fig_spacetime_cube(_et_gaze[cond]),
+                                    width="stretch",
+                                )
+
+            # ── 4. Per-condition details ──────────────────────────
+            st.markdown("---")
+            st.subheader("Session Details")
+            for _et_cond in conditions:
+                with st.expander(_et_cond, expanded=False):
+                    gaze_img = os.path.join(
+                        plots_dir(selected_run),
+                        f"sj{sj_num:02d}_L1_gaze_xy_pupil_{_et_cond}.png",
                     )
+                    if os.path.exists(gaze_img):
+                        st.image(gaze_img, width="stretch",
+                                 caption="Full-Session Gaze Trace")
 
-                et_prepro = load_csv(os.path.join(
-                    data_dir(selected_run),
-                    f"sj{sj_num:02d}_{_et_cond}_ET_Prepro1.csv",
-                ))
-                if et_prepro is not None:
-                    _c1, _c2, _c3 = st.columns(3)
-                    _c1.metric("ET Trials", len(et_prepro))
-                    _c2.metric("Mean Gaze Samples/Trial",
-                               f"{et_prepro['gaze_n_samples'].mean():.0f}")
-                    _c3.metric("Mean Gaze X",
-                               f"{et_prepro['gaze_mean_x_px'].mean():.0f} px")
-                    with st.expander("ET Prepro Table"):
-                        st.dataframe(et_prepro, width="stretch",
-                                     height=300)
+                    traj_img = os.path.join(
+                        plots_dir(selected_run),
+                        f"sj{sj_num:02d}_L_gaze_trajectories_{_et_cond}.png",
+                    )
+                    if os.path.exists(traj_img):
+                        st.image(traj_img, width="stretch",
+                                 caption="Gaze Trajectories by Outcome")
+
+                    et_info_path = os.path.join(
+                        data_dir(selected_run),
+                        f"sj{sj_num:02d}_{_et_cond}_et_tensor_info.json",
+                    )
+                    if os.path.exists(et_info_path):
+                        with open(et_info_path) as f:
+                            et_info = json.load(f)
+                        _c1, _c2, _c3 = st.columns(3)
+                        shape = et_info.get("shape", [])
+                        _c1.metric("Shape", f"{shape}")
+                        _c2.metric("Channels",
+                                   ", ".join(et_info.get("channel_names", [])))
+                        n_failed = len(et_info.get("failed_trials", []))
+                        _c3.metric("Failed Trials", n_failed)
+                        st.caption(
+                            f"Epochs with blinks: "
+                            f"{sum(et_info.get('has_blink', []))}"
+                        )
+
+                    et_prepro = load_csv(os.path.join(
+                        data_dir(selected_run),
+                        f"sj{sj_num:02d}_{_et_cond}_ET_Prepro1.csv",
+                    ))
+                    if et_prepro is not None:
+                        _c1, _c2, _c3 = st.columns(3)
+                        _c1.metric("ET Trials", len(et_prepro))
+                        _c2.metric("Mean Gaze Samples/Trial",
+                                   f"{et_prepro['gaze_n_samples'].mean():.0f}")
+                        _c3.metric("Mean Gaze X",
+                                   f"{et_prepro['gaze_mean_x_px'].mean():.0f} px")
+                        with st.expander("ET Prepro Table"):
+                            st.dataframe(et_prepro, width="stretch",
+                                         height=300)
 
 
 # ════════════════════════════════════════════════════════════
@@ -842,128 +942,177 @@ with tab_et:
 # ════════════════════════════════════════════════════════════
 
 with tab_vision:
-    if not selected_run or not sj_num:
-        st.info("Select a run and subject.")
+    if not selected_run or not subjects:
+        st.info("Select a run.")
     else:
-        st.header(f"Vision — sj{sj_num:02d}")
+        sj_list_vis = subjects if sj_num is None else [sj_num]
+        sj_label_vis = "All subjects" if sj_num is None else f"sj{sj_num:02d}"
+        st.header(f"Vision — {sj_label_vis}")
 
         vp_dir = vision_plots_dir(selected_run)
 
-        for _v_cond in conditions:
-            st.markdown("---")
-            st.subheader(f"{_v_cond}")
+        # ── All-subjects: aggregate category distribution ──────
+        if sj_num is None:
+            st.subheader("Category Distribution — pooled across subjects")
+            _cat_agg: dict = {}
+            _vis_metrics = []
+            for _sj in sj_list_vis:
+                for _vc in conditions:
+                    _vr = load_csv(os.path.join(
+                        vision_dir(selected_run, _sj, _vc),
+                        f"sj{_sj:02d}_{_vc}_vision_results.csv",
+                    ))
+                    if _vr is None:
+                        continue
+                    _row = {"Subject": f"sj{_sj:02d}", "Condition": _vc,
+                            "N fixations": len(_vr)}
+                    if "confidence" in _vr.columns:
+                        _row["Mean confidence"] = round(_vr["confidence"].mean(), 3)
+                    if "cluster_id" in _vr.columns:
+                        _row["N clusters"] = _vr["cluster_id"].nunique()
+                    _vis_metrics.append(_row)
+                    if "gaze_target_category" in _vr.columns:
+                        for cat, cnt in _vr["gaze_target_category"].value_counts().items():
+                            _cat_agg[cat] = _cat_agg.get(cat, 0) + int(cnt)
+            if _cat_agg:
+                _cat_colors = {
+                    "sky": "#87CEEB", "ocean": "#1E90FF", "water": "#4169E1",
+                    "people": "#FF6B6B", "vegetation": "#2E8B57",
+                    "trail_ground": "#CD853F", "other": "#A9A9A9",
+                }
+                _cat_df = pd.DataFrame(
+                    sorted(_cat_agg.items(), key=lambda x: -x[1]),
+                    columns=["Category", "Count"],
+                )
+                _fig_cat = px.bar(
+                    _cat_df, x="Category", y="Count",
+                    color="Category", color_discrete_map=_cat_colors,
+                    title=f"Pooled fixation categories ({len(sj_list_vis)} subjects)",
+                )
+                _fig_cat.update_layout(showlegend=False, height=380)
+                st.plotly_chart(_fig_cat, use_container_width=True)
+            if _vis_metrics:
+                st.dataframe(pd.DataFrame(_vis_metrics), hide_index=True,
+                             use_container_width=True)
+            st.info("Per-subject images (CLIP clusters, timelines, labeled frames) are available in single-subject view.")
 
-            _v_prefix = f"sj{sj_num:02d}_{_v_cond}"
+        # ── Single-subject detailed view ───────────────────────
+        if sj_num is not None:
+            for _v_cond in conditions:
+                st.markdown("---")
+                st.subheader(f"{_v_cond}")
 
-            v5_img = os.path.join(vp_dir, f"{_v_prefix}_V5_embedding_clusters.png")
-            if os.path.exists(v5_img):
-                st.image(v5_img, width="stretch",
-                         caption="CLIP Embedding Clusters (UMAP)")
+                _v_prefix = f"sj{sj_num:02d}_{_v_cond}"
 
-            v4_img = os.path.join(vp_dir, f"{_v_prefix}_V4_optimal_k.png")
-            if os.path.exists(v4_img):
-                st.image(v4_img, width="stretch",
-                         caption="Optimal K Analysis")
+                v5_img = os.path.join(vp_dir, f"{_v_prefix}_V5_embedding_clusters.png")
+                if os.path.exists(v5_img):
+                    st.image(v5_img, width="stretch",
+                             caption="CLIP Embedding Clusters (UMAP)")
 
-            v6_img = os.path.join(vp_dir, f"{_v_prefix}_V6_cluster_timeline.png")
-            if os.path.exists(v6_img):
-                st.image(v6_img, width="stretch",
-                         caption="Cluster Timeline")
+                v4_img = os.path.join(vp_dir, f"{_v_prefix}_V4_optimal_k.png")
+                if os.path.exists(v4_img):
+                    st.image(v4_img, width="stretch",
+                             caption="Optimal K Analysis")
 
-            v1_img = os.path.join(vp_dir, f"{_v_prefix}_V1_labeled_frames.png")
-            if os.path.exists(v1_img):
-                st.image(v1_img, width="stretch",
-                         caption="Labeled Frame Grid")
+                v6_img = os.path.join(vp_dir, f"{_v_prefix}_V6_cluster_timeline.png")
+                if os.path.exists(v6_img):
+                    st.image(v6_img, width="stretch",
+                             caption="Cluster Timeline")
 
-            v2_img = os.path.join(vp_dir, f"{_v_prefix}_V2_category_timeline.png")
-            if os.path.exists(v2_img):
-                st.image(v2_img, width="stretch",
-                         caption="Category Timeline")
+                v1_img = os.path.join(vp_dir, f"{_v_prefix}_V1_labeled_frames.png")
+                if os.path.exists(v1_img):
+                    st.image(v1_img, width="stretch",
+                             caption="Labeled Frame Grid")
 
-            v3_img = os.path.join(vp_dir, f"{_v_prefix}_V3_clip_vs_human.png")
-            if os.path.exists(v3_img):
-                st.image(v3_img, width="stretch",
-                         caption="CLIP vs Human Labels (Accuracy)")
+                v2_img = os.path.join(vp_dir, f"{_v_prefix}_V2_category_timeline.png")
+                if os.path.exists(v2_img):
+                    st.image(v2_img, width="stretch",
+                             caption="Category Timeline")
 
-            vr_path = os.path.join(
-                vision_dir(selected_run, sj_num, _v_cond),
-                f"sj{sj_num:02d}_{_v_cond}_vision_results.csv",
-            )
-            vision_results = load_csv(vr_path)
-            if vision_results is not None:
-                _c1, _c2, _c3 = st.columns(3)
-                _c1.metric("Total Fixations", len(vision_results))
-                if "confidence" in vision_results.columns:
-                    _c2.metric("Mean Confidence",
-                               f"{vision_results['confidence'].mean():.3f}")
-                if "cluster_id" in vision_results.columns:
-                    _c3.metric("N Clusters",
-                               vision_results["cluster_id"].nunique())
+                v3_img = os.path.join(vp_dir, f"{_v_prefix}_V3_clip_vs_human.png")
+                if os.path.exists(v3_img):
+                    st.image(v3_img, width="stretch",
+                             caption="CLIP vs Human Labels (Accuracy)")
 
-                if "gaze_target_category" in vision_results.columns:
-                    cat_counts = vision_results["gaze_target_category"].value_counts()
-                    _cat_colors = {
-                        "sky": "#87CEEB", "ocean": "#1E90FF",
-                        "water": "#4169E1", "people": "#FF6B6B",
-                        "vegetation": "#2E8B57", "trail_ground": "#CD853F",
-                        "other": "#A9A9A9",
-                    }
-                    fig_cat = px.bar(
-                        x=cat_counts.index,
-                        y=cat_counts.values,
-                        labels={"x": "Category", "y": "Count"},
-                        color=cat_counts.index,
-                        color_discrete_map=_cat_colors,
-                    )
-                    fig_cat.update_layout(showlegend=False, height=350,
-                                          title="Category Distribution (Fine-Tuned Head)")
-                    st.plotly_chart(fig_cat, use_container_width=True)
+                vr_path = os.path.join(
+                    vision_dir(selected_run, sj_num, _v_cond),
+                    f"sj{sj_num:02d}_{_v_cond}_vision_results.csv",
+                )
+                vision_results = load_csv(vr_path)
+                if vision_results is not None:
+                    _c1, _c2, _c3 = st.columns(3)
+                    _c1.metric("Total Fixations", len(vision_results))
+                    if "confidence" in vision_results.columns:
+                        _c2.metric("Mean Confidence",
+                                   f"{vision_results['confidence'].mean():.3f}")
+                    if "cluster_id" in vision_results.columns:
+                        _c3.metric("N Clusters",
+                                   vision_results["cluster_id"].nunique())
 
-                if "cluster_id" in vision_results.columns:
-                    cluster_counts = vision_results["cluster_id"].value_counts().sort_index()
-                    fig_cl = px.bar(
-                        x=cluster_counts.index.astype(str),
-                        y=cluster_counts.values,
-                        labels={"x": "Cluster ID", "y": "Count"},
-                        color=cluster_counts.index.astype(str),
-                    )
-                    fig_cl.update_layout(showlegend=False, height=300,
-                                         title="Cluster Size Distribution")
-                    st.plotly_chart(fig_cl, width="stretch")
+                    if "gaze_target_category" in vision_results.columns:
+                        cat_counts = vision_results["gaze_target_category"].value_counts()
+                        _cat_colors = {
+                            "sky": "#87CEEB", "ocean": "#1E90FF",
+                            "water": "#4169E1", "people": "#FF6B6B",
+                            "vegetation": "#2E8B57", "trail_ground": "#CD853F",
+                            "other": "#A9A9A9",
+                        }
+                        fig_cat = px.bar(
+                            x=cat_counts.index,
+                            y=cat_counts.values,
+                            labels={"x": "Category", "y": "Count"},
+                            color=cat_counts.index,
+                            color_discrete_map=_cat_colors,
+                        )
+                        fig_cat.update_layout(showlegend=False, height=350,
+                                              title="Category Distribution (Fine-Tuned Head)")
+                        st.plotly_chart(fig_cat, use_container_width=True)
 
-                if "confidence" in vision_results.columns:
-                    fig_conf = px.histogram(
-                        vision_results, x="confidence", nbins=30,
-                        labels={"confidence": "CLIP Confidence"},
-                        color_discrete_sequence=["#3498db"],
-                    )
-                    fig_conf.add_vline(x=0.25, line_dash="dash",
-                                       line_color="red",
-                                       annotation_text="chance")
-                    fig_conf.add_vline(x=0.45, line_dash="dash",
-                                       line_color="green",
-                                       annotation_text="reliable")
-                    fig_conf.update_layout(height=300,
-                                           title="Confidence Distribution")
-                    st.plotly_chart(fig_conf, width="stretch")
+                    if "cluster_id" in vision_results.columns:
+                        cluster_counts = vision_results["cluster_id"].value_counts().sort_index()
+                        fig_cl = px.bar(
+                            x=cluster_counts.index.astype(str),
+                            y=cluster_counts.values,
+                            labels={"x": "Cluster ID", "y": "Count"},
+                            color=cluster_counts.index.astype(str),
+                        )
+                        fig_cl.update_layout(showlegend=False, height=300,
+                                             title="Cluster Size Distribution")
+                        st.plotly_chart(fig_cl, width="stretch")
 
-                with st.expander("Full Fixation Table"):
-                    st.dataframe(vision_results, width="stretch",
-                                 height=400)
+                    if "confidence" in vision_results.columns:
+                        fig_conf = px.histogram(
+                            vision_results, x="confidence", nbins=30,
+                            labels={"confidence": "CLIP Confidence"},
+                            color_discrete_sequence=["#3498db"],
+                        )
+                        fig_conf.add_vline(x=0.25, line_dash="dash",
+                                           line_color="red",
+                                           annotation_text="chance")
+                        fig_conf.add_vline(x=0.45, line_dash="dash",
+                                           line_color="green",
+                                           annotation_text="reliable")
+                        fig_conf.update_layout(height=300,
+                                               title="Confidence Distribution")
+                        st.plotly_chart(fig_conf, width="stretch")
 
-            crops_d = os.path.join(
-                vision_dir(selected_run, sj_num, _v_cond), "crops"
-            )
-            if os.path.isdir(crops_d):
-                crop_files = sorted(glob.glob(os.path.join(crops_d, "*.png")))
-                if crop_files:
-                    n_show = min(12, len(crop_files))
-                    sample = crop_files[::max(1, len(crop_files) // n_show)][:n_show]
-                    cols = st.columns(4)
-                    for i, cf in enumerate(sample):
-                        with cols[i % 4]:
-                            st.image(cf, caption=os.path.basename(cf),
-                                     width="stretch")
+                    with st.expander("Full Fixation Table"):
+                        st.dataframe(vision_results, width="stretch",
+                                     height=400)
+
+                crops_d = os.path.join(
+                    vision_dir(selected_run, sj_num, _v_cond), "crops"
+                )
+                if os.path.isdir(crops_d):
+                    crop_files = sorted(glob.glob(os.path.join(crops_d, "*.png")))
+                    if crop_files:
+                        n_show = min(12, len(crop_files))
+                        sample = crop_files[::max(1, len(crop_files) // n_show)][:n_show]
+                        cols = st.columns(4)
+                        for i, cf in enumerate(sample):
+                            with cols[i % 4]:
+                                st.image(cf, caption=os.path.basename(cf),
+                                         width="stretch")
 
 
 # ════════════════════════════════════════════════════════════
@@ -971,77 +1120,113 @@ with tab_vision:
 # ════════════════════════════════════════════════════════════
 
 with tab_fusion:
-    if not selected_run or not sj_num:
-        st.info("Select a run and subject.")
+    if not selected_run or not subjects:
+        st.info("Select a run.")
     else:
-        st.header(f"Fusion & DL — sj{sj_num:02d}")
+        sj_list_fu = subjects if sj_num is None else [sj_num]
+        sj_label_fu = "All subjects" if sj_num is None else f"sj{sj_num:02d}"
+        st.header(f"Fusion & DL — {sj_label_fu}")
 
-        # Attend vs Unattend cluster entropy comparison
+        # Cluster entropy across subjects + conditions
         if len(conditions) > 1:
             entropy_data = []
-            for cond in conditions:
-                vf = load_csv(os.path.join(
-                    data_dir(selected_run),
-                    f"sj{sj_num:02d}_{cond}_vision_trial_features.csv",
-                ))
-                if vf is not None and "cluster_entropy" in vf.columns:
-                    valid = vf["cluster_entropy"].dropna()
-                    for v in valid:
-                        entropy_data.append({"Condition": cond,
-                                             "Cluster Entropy": v})
+            for _sj in sj_list_fu:
+                for cond in conditions:
+                    vf = load_csv(os.path.join(
+                        data_dir(selected_run),
+                        f"sj{_sj:02d}_{cond}_vision_trial_features.csv",
+                    ))
+                    if vf is not None and "cluster_entropy" in vf.columns:
+                        valid = vf["cluster_entropy"].dropna()
+                        for v in valid:
+                            entropy_data.append({
+                                "Subject": f"sj{_sj:02d}",
+                                "Condition": cond,
+                                "Cluster Entropy": v,
+                            })
             if entropy_data:
                 st.subheader("Cluster Entropy: Attend vs Unattend")
+                _ent_df = pd.DataFrame(entropy_data)
                 fig_ent = px.box(
-                    pd.DataFrame(entropy_data),
+                    _ent_df,
                     x="Condition", y="Cluster Entropy",
-                    color="Condition",
+                    color="Subject" if sj_num is None else "Condition",
                 )
-                fig_ent.update_layout(height=350, showlegend=False)
-                st.plotly_chart(fig_ent, width="stretch")
+                fig_ent.update_layout(height=350, showlegend=(sj_num is None))
+                st.plotly_chart(fig_ent, use_container_width=True)
 
-        for _f_cond in conditions:
-            st.markdown("---")
-            st.subheader(f"{_f_cond}")
+        # Tensor shapes for all subjects
+        if sj_num is None:
+            st.subheader("DL Tensor Summary — all subjects")
+            _tensor_rows = []
+            _dl_dir = os.path.join(data_dir(selected_run), "dl_tensors")
+            if os.path.isdir(_dl_dir):
+                for _sj in sj_list_fu:
+                    for _fc in conditions:
+                        _pfx = f"sj{_sj:02d}_{_fc}"
+                        for _name in ["X_eeg_train", "X_eeg_val", "X_et_train", "X_et_val"]:
+                            _p = os.path.join(_dl_dir, f"{_pfx}_{_name}.npy")
+                            if os.path.exists(_p):
+                                import numpy as _np2
+                                _arr = _np2.load(_p, mmap_mode="r")
+                                _tensor_rows.append({
+                                    "Subject": f"sj{_sj:02d}",
+                                    "Condition": _fc,
+                                    "Tensor": _name,
+                                    "Shape": str(_arr.shape),
+                                    "MB": f"{os.path.getsize(_p)/1e6:.1f}",
+                                })
+            if _tensor_rows:
+                st.dataframe(pd.DataFrame(_tensor_rows), hide_index=True,
+                             use_container_width=True)
+            else:
+                st.info("No DL tensors found. Run dl_prep first.")
 
-            fused = load_csv(os.path.join(
-                data_dir(selected_run),
-                f"sj{sj_num:02d}_{_f_cond}_fused_metadata.csv",
-            ))
-            vision_feats = load_csv(os.path.join(
-                data_dir(selected_run),
-                f"sj{sj_num:02d}_{_f_cond}_vision_trial_features.csv",
-            ))
+        # Per-condition detail (single subject only)
+        if sj_num is not None:
+            for _f_cond in conditions:
+                st.markdown("---")
+                st.subheader(f"{_f_cond}")
 
-            if fused is not None:
-                st.dataframe(fused.head(20), width="stretch",
-                             height=350)
-                st.caption(f"Shape: {fused.shape}")
+                fused = load_csv(os.path.join(
+                    data_dir(selected_run),
+                    f"sj{sj_num:02d}_{_f_cond}_fused_metadata.csv",
+                ))
+                vision_feats = load_csv(os.path.join(
+                    data_dir(selected_run),
+                    f"sj{sj_num:02d}_{_f_cond}_vision_trial_features.csv",
+                ))
 
-            dl_dir = os.path.join(data_dir(selected_run), "dl_tensors")
-            if os.path.isdir(dl_dir):
-                tensor_info = []
-                _f_prefix = f"sj{sj_num:02d}_{_f_cond}"
-                for name in ["X_eeg_train", "X_eeg_val", "X_et_train",
-                              "X_et_val", "y_train", "y_val"]:
-                    npy_path = os.path.join(dl_dir, f"{_f_prefix}_{name}.npy")
-                    if os.path.exists(npy_path):
-                        arr = np.load(npy_path, mmap_mode="r")
-                        tensor_info.append({
-                            "Tensor": name,
-                            "Shape": str(arr.shape),
-                            "Dtype": str(arr.dtype),
-                            "Size (MB)": f"{os.path.getsize(npy_path) / 1e6:.1f}",
-                        })
-                if tensor_info:
-                    st.dataframe(pd.DataFrame(tensor_info),
-                                 width="stretch", hide_index=True)
+                if fused is not None:
+                    st.dataframe(fused.head(20), width="stretch",
+                                 height=350)
+                    st.caption(f"Shape: {fused.shape}")
 
-            if vision_feats is not None:
-                with st.expander("Vision Trial Features"):
-                    display_cols = [c for c in vision_feats.columns
-                                    if c != "mean_embedding"]
-                    st.dataframe(vision_feats[display_cols],
-                                 width="stretch", height=350)
+                dl_dir = os.path.join(data_dir(selected_run), "dl_tensors")
+                if os.path.isdir(dl_dir):
+                    tensor_info = []
+                    _f_prefix = f"sj{sj_num:02d}_{_f_cond}"
+                    for name in ["X_eeg_train", "X_eeg_val", "X_et_train",
+                                  "X_et_val", "y_train", "y_val"]:
+                        npy_path = os.path.join(dl_dir, f"{_f_prefix}_{name}.npy")
+                        if os.path.exists(npy_path):
+                            arr = np.load(npy_path, mmap_mode="r")
+                            tensor_info.append({
+                                "Tensor": name,
+                                "Shape": str(arr.shape),
+                                "Dtype": str(arr.dtype),
+                                "Size (MB)": f"{os.path.getsize(npy_path) / 1e6:.1f}",
+                            })
+                    if tensor_info:
+                        st.dataframe(pd.DataFrame(tensor_info),
+                                     width="stretch", hide_index=True)
+
+                if vision_feats is not None:
+                    with st.expander("Vision Trial Features"):
+                        display_cols = [c for c in vision_feats.columns
+                                        if c != "mean_embedding"]
+                        st.dataframe(vision_feats[display_cols],
+                                     width="stretch", height=350)
 
 
 # ════════════════════════════════════════════════════════════
@@ -1049,8 +1234,11 @@ with tab_fusion:
 # ════════════════════════════════════════════════════════════
 
 with tab_nogo:
-    if not selected_run or not sj_num:
-        st.info("Select a run and subject.")
+    if not selected_run or not subjects:
+        st.info("Select a run.")
+    elif sj_num is None:
+        st.info("Select a specific subject from the dropdown above to train or view EEGNet results. "
+                "Training is per-subject.")
     else:
         st.header(f"EEGNet — sj{sj_num:02d}")
         st.caption(
