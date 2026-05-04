@@ -48,13 +48,27 @@ ET_FOLDER_MAP = {
     "sit_unattend": "Unattend_Sit",
 }
 
-# Map condition label → world video filename template
-# (world_video_dir is supplied at runtime from run_config.yaml data.world_video_dir)
-WORLD_VIDEO_MAP = {
-    "walk_attend": "sj{sj_num:02d}_attend_world_video.mp4",
-    "walk_unattend": "sj{sj_num:02d}_unattend_world_video.mp4",
-    "sit_attend": "sj{sj_num:02d}_attend_sit_world_video.mp4",
-    "sit_unattend": "sj{sj_num:02d}_unattend_sit_world_video.mp4",
+# Map condition label → ordered list of candidate filename templates.
+# get_world_video_path() returns the first candidate that exists on disk.
+# More-specific names (walk_attend, sit_attend) are tried before generic ones
+# so the right file is picked when both naming conventions are present.
+WORLD_VIDEO_CANDIDATES = {
+    "walk_attend":   [
+        "sj{sj_num:02d}_walk_attend_world_video.mp4",   # preferred: explicit walk
+        "sj{sj_num:02d}_attend_world_video.mp4",         # legacy fallback
+    ],
+    "walk_unattend": [
+        "sj{sj_num:02d}_walk_unattend_world_video.mp4",
+        "sj{sj_num:02d}_unattend_world_video.mp4",
+    ],
+    "sit_attend":    [
+        "sj{sj_num:02d}_sit_attend_world_video.mp4",
+        "sj{sj_num:02d}_attend_sit_world_video.mp4",    # legacy order variant
+    ],
+    "sit_unattend":  [
+        "sj{sj_num:02d}_sit_unattend_world_video.mp4",
+        "sj{sj_num:02d}_unattend_sit_world_video.mp4",
+    ],
 }
 
 CROP_SIZE = 224
@@ -72,15 +86,27 @@ def get_eye_dir(r_dir, sj_num, condition_label):
 def get_world_video_path(sj_num, condition_label, world_video_dir):
     """Return absolute path to the world video for this subject/condition.
 
+    Tries each candidate filename in WORLD_VIDEO_CANDIDATES order and returns
+    the first one that exists on disk.  This lets both naming conventions
+    (e.g. ``walk_attend_world_video.mp4`` and the legacy ``attend_world_video.mp4``)
+    coexist without manual config changes.
+
     Args:
         world_video_dir: Directory containing world videos — read from
             run_config.yaml ``data.world_video_dir``.
+
+    Returns:
+        Absolute path string if a matching file is found, else None.
     """
-    template = WORLD_VIDEO_MAP.get(condition_label)
-    if template is None or not world_video_dir:
+    candidates = WORLD_VIDEO_CANDIDATES.get(condition_label)
+    if not candidates or not world_video_dir:
         return None
-    fname = template.format(sj_num=sj_num)
-    return os.path.join(world_video_dir, fname)
+    for template in candidates:
+        path = os.path.join(world_video_dir, template.format(sj_num=sj_num))
+        if os.path.exists(path):
+            return path
+    # Return the first candidate path (will trigger a clear missing-file message)
+    return os.path.join(world_video_dir, candidates[0].format(sj_num=sj_num))
 
 
 def get_vision_out_dir(run_dir, sj_num, condition_label):
