@@ -23,7 +23,18 @@ import et_viz
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "src", "run_config.yaml")
-VENV_PYTHON = os.path.join(PROJECT_ROOT, ".venv", "bin", "python3.11")
+def _find_venv_python():
+    """Find the Python binary inside .venv, falling back to sys.executable."""
+    venv_bin = os.path.join(PROJECT_ROOT, ".venv", "bin")
+    # Prefer the version-agnostic symlink, then any python3.x, then fallback
+    for candidate in ["python3", "python"]:
+        p = os.path.join(venv_bin, candidate)
+        if os.path.exists(p):
+            return p
+    versioned = sorted(glob.glob(os.path.join(venv_bin, "python3.*")), reverse=True)
+    return versioned[0] if versioned else sys.executable
+
+VENV_PYTHON = _find_venv_python()
 
 st.set_page_config(
     page_title="PSY197B Dashboard",
