@@ -3,6 +3,7 @@ date: "auto"
 data:
   root: "data"
   subjects: [3]
+  world_video_dir: "/Users/madhav/PSY197B_worldvideos"  # absolute path; override per machine
 
 eeg:
   reference_channels: ["TP9", "TP10"]

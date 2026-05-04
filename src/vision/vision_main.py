@@ -47,9 +47,11 @@ from vision.visualizer import (
 from vision import embeddings as emb_module
 
 # ── Configuration ─────────────────────────────────────────────
-R_DIR = "/Users/madhav/PSY197B"
+# Project root is derived from this file's location — never hardcoded.
+_PROJECT_ROOT = os.path.dirname(_SRC_DIR)
+
 DEFAULT_RUN_ID = None
-SUBJECTS = [4]
+SUBJECTS = [3]        # fallback only; overridden by run_config.yaml data.subjects
 CONDITIONS = None
 N_LABEL_SAMPLES = 100
 RUN_ANNOTATOR_FLAG = False
@@ -59,8 +61,7 @@ MAX_FIXATIONS = None
 N_CLUSTERS = 7
 
 # Shared trained classification head (run-independent).
-# Set to a .pt path, True to auto-train from human labels, or False for zero-shot.
-TRAINED_HEAD_PATH = os.path.join(R_DIR, "models", "clip_head.pt")
+TRAINED_HEAD_PATH = os.path.join(_PROJECT_ROOT, "models", "clip_head.pt")
 
 
 def _load_run_config(run_dir):
@@ -98,11 +99,17 @@ def _subjects_from_run_dir(run_dir):
     return SUBJECTS
 
 
-def _process_condition(sj_num, condition, run_dir, classifier):
+def _world_video_dir_from_run_dir(run_dir):
+    """Read world_video_dir from run config; returns None if not set."""
+    cfg = _load_run_config(run_dir)
+    return cfg.get("data", {}).get("world_video_dir", None)
+
+
+def _process_condition(sj_num, condition, run_dir, classifier, world_video_dir=None):
     """Run all vision pipeline phases for one subject × condition."""
     label = condition
-    eye_dir = get_eye_dir(R_DIR, sj_num, label)
-    video_path = get_world_video_path(sj_num, label)
+    eye_dir = get_eye_dir(_PROJECT_ROOT, sj_num, label)
+    video_path = get_world_video_path(sj_num, label, world_video_dir)
     vision_dir = get_vision_out_dir(run_dir, sj_num, label)
 
     # Clean slate: wipe any previous vision output for this condition
@@ -569,12 +576,13 @@ def run(run_dir_override=None):
 
     Args:
         run_dir_override: Absolute path to the run directory.
-            If None, uses R_DIR/runs/DEFAULT_RUN_ID.
+            If None, uses the most recent run in _PROJECT_ROOT/runs/ (or
+            _PROJECT_ROOT/runs/DEFAULT_RUN_ID if DEFAULT_RUN_ID is set).
     """
     if run_dir_override:
         the_run_dir = run_dir_override
     elif DEFAULT_RUN_ID is None:
-        runs_root = os.path.join(R_DIR, "runs")
+        runs_root = os.path.join(_PROJECT_ROOT, "runs")
         run_dirs = sorted(
             [
                 os.path.join(runs_root, d)
@@ -587,7 +595,7 @@ def run(run_dir_override=None):
             raise FileNotFoundError("No run directories found in runs/")
         the_run_dir = run_dirs[0]
     else:
-        the_run_dir = os.path.join(R_DIR, "runs", DEFAULT_RUN_ID)
+        the_run_dir = os.path.join(_PROJECT_ROOT, "runs", DEFAULT_RUN_ID)
     os.makedirs(the_run_dir, exist_ok=True)
 
     print(f"Vision run dir: {the_run_dir}")
@@ -599,8 +607,10 @@ def run(run_dir_override=None):
 
     run_conditions = CONDITIONS or _conditions_from_run_dir(the_run_dir)
     run_subjects = _subjects_from_run_dir(the_run_dir)
-    print(f"Subjects: {run_subjects}")
-    print(f"Conditions: {run_conditions}")
+    world_video_dir = _world_video_dir_from_run_dir(the_run_dir)
+    print(f"Subjects:        {run_subjects}")
+    print(f"Conditions:      {run_conditions}")
+    print(f"World video dir: {world_video_dir or '(not set — video-dependent phases will be skipped)'}")
 
     for sj_num in run_subjects:
         for condition in run_conditions:
@@ -608,7 +618,8 @@ def run(run_dir_override=None):
             print(f"  Vision Pipeline — sj{sj_num:02d} {condition}")
             print(f"{'='*60}")
 
-            results_df = _process_condition(sj_num, condition, the_run_dir, classifier)
+            results_df = _process_condition(sj_num, condition, the_run_dir, classifier,
+                                            world_video_dir=world_video_dir)
 
             if results_df is not None and not results_df.empty:
                 top3 = results_df["gaze_target_category"].value_counts().head(3)

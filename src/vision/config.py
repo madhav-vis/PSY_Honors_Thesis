@@ -48,9 +48,8 @@ ET_FOLDER_MAP = {
     "sit_unattend": "Unattend_Sit",
 }
 
-WORLD_VIDEO_DIR = "/Users/madhav/PSY197B_worldvideos"
-
-# Map condition label → world video filename
+# Map condition label → world video filename template
+# (world_video_dir is supplied at runtime from run_config.yaml data.world_video_dir)
 WORLD_VIDEO_MAP = {
     "walk_attend": "sj{sj_num:02d}_attend_world_video.mp4",
     "walk_unattend": "sj{sj_num:02d}_unattend_world_video.mp4",
@@ -70,12 +69,18 @@ def get_eye_dir(r_dir, sj_num, condition_label):
     return os.path.join(r_dir, "data", f"sj{sj_num:02d}", "eye", folder)
 
 
-def get_world_video_path(sj_num, condition_label):
+def get_world_video_path(sj_num, condition_label, world_video_dir):
+    """Return absolute path to the world video for this subject/condition.
+
+    Args:
+        world_video_dir: Directory containing world videos — read from
+            run_config.yaml ``data.world_video_dir``.
+    """
     template = WORLD_VIDEO_MAP.get(condition_label)
-    if template is None:
+    if template is None or not world_video_dir:
         return None
     fname = template.format(sj_num=sj_num)
-    return os.path.join(WORLD_VIDEO_DIR, fname)
+    return os.path.join(world_video_dir, fname)
 
 
 def get_vision_out_dir(run_dir, sj_num, condition_label):
