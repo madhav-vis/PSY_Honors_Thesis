@@ -63,8 +63,8 @@ N_CLUSTERS = 7
 TRAINED_HEAD_PATH = os.path.join(R_DIR, "models", "clip_head.pt")
 
 
-def _conditions_from_run_dir(run_dir):
-    """Prefer the run snapshot; fallback to global run_config."""
+def _load_run_config(run_dir):
+    """Load run config — prefers run snapshot, falls back to global src config."""
     candidates = [
         os.path.join(run_dir, "run_config_snapshot.yaml"),
         os.path.join(_SRC_DIR, "run_config.yaml"),
@@ -74,17 +74,28 @@ def _conditions_from_run_dir(run_dir):
             continue
         try:
             with open(cfg_path, "r") as f:
-                cfg = yaml.safe_load(f) or {}
-            conds = cfg.get("conditions", [])
-            labels = []
-            for c in conds:
-                if isinstance(c, dict) and c.get("eeg_label"):
-                    labels.append(c["eeg_label"])
-            if labels:
-                return labels
+                return yaml.safe_load(f) or {}
         except Exception:
             continue
-    return ["walk_attend", "walk_unattend"]
+    return {}
+
+
+def _conditions_from_run_dir(run_dir):
+    """Read condition labels from run config."""
+    cfg = _load_run_config(run_dir)
+    conds = cfg.get("conditions", [])
+    labels = [c["eeg_label"] for c in conds
+              if isinstance(c, dict) and c.get("eeg_label")]
+    return labels or ["walk_attend", "walk_unattend"]
+
+
+def _subjects_from_run_dir(run_dir):
+    """Read subject list from run config (fallback: global SUBJECTS constant)."""
+    cfg = _load_run_config(run_dir)
+    sjs = cfg.get("data", {}).get("subjects", None)
+    if sjs and isinstance(sjs, list) and all(isinstance(s, int) for s in sjs):
+        return sorted(sjs)
+    return SUBJECTS
 
 
 def _process_condition(sj_num, condition, run_dir, classifier):
@@ -587,8 +598,11 @@ def run(run_dir_override=None):
     summary = []
 
     run_conditions = CONDITIONS or _conditions_from_run_dir(the_run_dir)
+    run_subjects = _subjects_from_run_dir(the_run_dir)
+    print(f"Subjects: {run_subjects}")
+    print(f"Conditions: {run_conditions}")
 
-    for sj_num in SUBJECTS:
+    for sj_num in run_subjects:
         for condition in run_conditions:
             print(f"\n{'='*60}")
             print(f"  Vision Pipeline — sj{sj_num:02d} {condition}")
