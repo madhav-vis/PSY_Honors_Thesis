@@ -345,38 +345,123 @@ with tab_run:
     with col_launch:
         st.subheader("Run Pipeline")
 
-        col_b1, col_b2 = st.columns(2)
-        run_main = col_b1.button("Run EEG/ET Pipeline", type="primary")
-        run_vision = col_b2.button("Run Vision Pipeline")
+        col_b1, col_b2, col_b3 = st.columns(3)
+        run_main = col_b1.button("▶ EEG / ET", type="primary",
+                                 use_container_width=True)
+        run_vision = col_b2.button("▶ Vision", use_container_width=True)
+        run_nogo_btn = col_b3.button("▶ EEGNet", use_container_width=True)
 
         if "pipeline_log" not in st.session_state:
             st.session_state.pipeline_log = ""
         if "pipeline_running" not in st.session_state:
             st.session_state.pipeline_running = False
 
+        def _stream_pipeline(cmd, label, *, timeout_s=3600,
+                             stage_keywords=None):
+            """Run cmd, stream output line-by-line, return (returncode, log)."""
+            # Progress bar markers: list of (keyword_in_line, fraction)
+            # sorted by fraction ascending so we advance as stages complete.
+            if stage_keywords is None:
+                stage_keywords = []
+            progress_bar = st.progress(0, text=f"Starting {label}…")
+            log_box = st.empty()
+            lines = []
+            fraction = 0.0
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    cwd=PROJECT_ROOT,
+                )
+                import threading, time as _time
+                # Watchdog: kill if timeout exceeded
+                _killed = [False]
+                def _watchdog():
+                    _time.sleep(timeout_s)
+                    if proc.poll() is None:
+                        proc.kill()
+                        _killed[0] = True
+                threading.Thread(target=_watchdog, daemon=True).start()
+
+                for raw_line in proc.stdout:
+                    line = raw_line.rstrip()
+                    lines.append(line)
+                    # Advance progress bar by matching known stage keywords
+                    for kw, frac in stage_keywords:
+                        if kw in line and frac > fraction:
+                            fraction = frac
+                            break
+                    # Pulse: even without stage matches, creep toward 0.95
+                    if fraction < 0.05:
+                        fraction = min(0.05, fraction + 0.002)
+                    display_frac = min(fraction, 0.95)
+                    progress_bar.progress(display_frac,
+                                          text=f"{label} — {line[:80]}")
+                    # Show last 40 lines live
+                    log_box.code("\n".join(lines[-40:]), language="text")
+
+                proc.wait()
+                rc = proc.returncode
+                if _killed[0]:
+                    lines.append(f"\n[TIMEOUT after {timeout_s}s — process killed]")
+                    rc = -1
+            except Exception as exc:
+                lines.append(f"\n[ERROR launching process: {exc}]")
+                rc = -1
+            finally:
+                if rc == 0:
+                    progress_bar.progress(1.0, text=f"{label} complete ✓")
+                else:
+                    progress_bar.progress(
+                        min(fraction, 0.95),
+                        text=f"{label} failed (exit {rc})",
+                    )
+                log_box.empty()
+            return rc, "\n".join(lines)
+
+        # ── EEG/ET pipeline ──
+        _EEG_STAGES = [
+            ("STEP: 01", 0.10),
+            ("STEP: 02", 0.25),
+            ("STEP: 03", 0.45),
+            ("STEP: 04", 0.60),
+            ("STEP: 05", 0.75),
+            ("STEP: 06", 0.88),
+            ("PIPELINE COMPLETE", 0.95),
+        ]
+
         if run_main and not st.session_state.pipeline_running:
             st.session_state.pipeline_running = True
             st.session_state.pipeline_log = ""
             cmd = [VENV_PYTHON, os.path.join(PROJECT_ROOT, "src", "main.py"),
                    "all"]
-            with st.spinner("Running EEG/ET pipeline..."):
-                try:
-                    result = subprocess.run(
-                        cmd, capture_output=True, text=True, timeout=1800,
-                        cwd=PROJECT_ROOT,
-                    )
-                    st.session_state.pipeline_log = result.stdout + result.stderr
-                    if result.returncode == 0:
-                        st.success("Pipeline completed!")
-                    else:
-                        st.error(f"Pipeline failed (exit code {result.returncode})")
-                except subprocess.TimeoutExpired:
-                    st.error("Pipeline timed out (30 min limit)")
-                except Exception as e:
-                    st.error(f"Error: {e}")
-                finally:
-                    st.session_state.pipeline_running = False
-                    st.cache_data.clear()
+            rc, log = _stream_pipeline(cmd, "EEG/ET pipeline",
+                                       timeout_s=1800,
+                                       stage_keywords=_EEG_STAGES)
+            st.session_state.pipeline_log = log
+            if rc == 0:
+                st.success("EEG/ET pipeline completed!")
+            else:
+                st.error(f"EEG/ET pipeline failed (exit {rc})")
+            st.session_state.pipeline_running = False
+            st.cache_data.clear()
+
+        # ── Vision pipeline ──
+        _VISION_STAGES = [
+            ("Subjects:", 0.03),
+            ("Vision Pipeline —", 0.10),
+            ("Phase 1", 0.20),
+            ("Phase 2", 0.32),
+            ("Phase 3", 0.45),
+            ("Phase 4", 0.57),
+            ("Phase 5", 0.68),
+            ("Phase 6", 0.78),
+            ("Phase 7", 0.87),
+            ("VISION PIPELINE SUMMARY", 0.93),
+            ("Vision pipeline complete", 0.95),
+        ]
 
         if run_vision and not st.session_state.pipeline_running:
             st.session_state.pipeline_running = True
@@ -384,27 +469,50 @@ with tab_run:
             cmd = [VENV_PYTHON,
                    os.path.join(PROJECT_ROOT, "src", "vision", "vision_main.py"),
                    "--run-dir", run_dir(selected_run) if selected_run else ""]
-            with st.spinner("Running vision pipeline..."):
-                try:
-                    result = subprocess.run(
-                        cmd, capture_output=True, text=True, timeout=3600,
-                        cwd=PROJECT_ROOT,
-                    )
-                    st.session_state.pipeline_log = result.stdout + result.stderr
-                    if result.returncode == 0:
-                        st.success("Vision pipeline completed!")
-                    else:
-                        st.error(f"Vision pipeline failed (exit code {result.returncode})")
-                except subprocess.TimeoutExpired:
-                    st.error("Vision pipeline timed out (60 min limit)")
-                except Exception as e:
-                    st.error(f"Error: {e}")
-                finally:
-                    st.session_state.pipeline_running = False
-                    st.cache_data.clear()
+            rc, log = _stream_pipeline(cmd, "Vision pipeline",
+                                       timeout_s=3600,
+                                       stage_keywords=_VISION_STAGES)
+            st.session_state.pipeline_log = log
+            if rc == 0:
+                st.success("Vision pipeline completed!")
+            else:
+                st.error(f"Vision pipeline failed (exit {rc})")
+            st.session_state.pipeline_running = False
+            st.cache_data.clear()
+
+        # ── EEGNet pipeline ──
+        if run_nogo_btn and not st.session_state.pipeline_running:
+            st.session_state.pipeline_running = True
+            st.session_state.pipeline_log = ""
+            _nogo_sj = sj_num if sj_num is not None else (subjects[0] if subjects else None)
+            if _nogo_sj is None:
+                st.warning("Select a subject before running EEGNet.")
+                st.session_state.pipeline_running = False
+            else:
+                cmd = [VENV_PYTHON,
+                       os.path.join(PROJECT_ROOT, "src", "nogo_classifier.py"),
+                       "--subject", str(_nogo_sj),
+                       "--run-dir", run_dir(selected_run) if selected_run else ""]
+                _EEGNET_STAGES = [
+                    ("Fold", 0.15),
+                    ("Epoch", 0.30),
+                    ("val_acc", 0.60),
+                    ("Best", 0.80),
+                    ("complete", 0.95),
+                ]
+                rc, log = _stream_pipeline(cmd, f"EEGNet sj{_nogo_sj:02d}",
+                                           timeout_s=1800,
+                                           stage_keywords=_EEGNET_STAGES)
+                st.session_state.pipeline_log = log
+                if rc == 0:
+                    st.success("EEGNet training complete!")
+                else:
+                    st.error(f"EEGNet failed (exit {rc})")
+                st.session_state.pipeline_running = False
+                st.cache_data.clear()
 
         if st.session_state.pipeline_log:
-            with st.expander("Pipeline Output", expanded=True):
+            with st.expander("Pipeline Output", expanded=False):
                 st.code(st.session_state.pipeline_log, language="text")
 
 
