@@ -10,6 +10,9 @@ Usage:
     python src/train.py --phase 3             # multimodal EEG+ET
     python src/train.py --phase 4             # outcome prediction
     python src/train.py --phase 5             # vision integration
+    python src/train.py --phase 8             # LOSO cross-validation
+    python src/train.py --phase 9             # gaze comparison (walking)
+    python src/train.py --phase 10            # cross-condition transfer
     python src/train.py --run 2026-04-22_1430_sj04_walk_pilot
 """
 
@@ -24,11 +27,13 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import yaml
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.metrics import (
     accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score,
+    precision_score, recall_score,
     classification_report, confusion_matrix,
     mean_squared_error, r2_score,
 )
@@ -41,6 +46,42 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
+MODEL_CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs", "config.yaml")
+
+
+def load_model_config():
+    """Load configs/config.yaml for model architecture and training params."""
+    if os.path.exists(MODEL_CONFIG_PATH):
+        with open(MODEL_CONFIG_PATH) as f:
+            return yaml.safe_load(f)
+    return {}
+
+
+def _eegnet_kwargs(cfg):
+    """Extract EEGNet hyperparams from config dict."""
+    ec = cfg.get("model", {}).get("eegnet", {})
+    return {
+        "F1": ec.get("F1", 8),
+        "D": ec.get("D", 2),
+        "F2": ec.get("F2", 16),
+        "dropout": ec.get("dropout", 0.25),
+        "kernel_length": ec.get("kernel_length", 64),
+        "sep_kernel_length": ec.get("sep_kernel_length", 16),
+        "use_transformer": ec.get("use_transformer", False),
+        "n_heads": ec.get("transformer_heads", 2),
+        "transformer_dropout": ec.get("transformer_dropout", 0.1),
+    }
+
+
+def _training_kwargs(cfg):
+    """Extract training hyperparams from config dict."""
+    tc = cfg.get("training", {})
+    return {
+        "n_epochs": tc.get("epochs", 100),
+        "batch_size": tc.get("batch_size", 32),
+        "lr": tc.get("learning_rate", 1e-3),
+        "patience": tc.get("early_stopping_patience", 10),
+    }
 
 
 # ═══════════════════════════════════════════════════════════
@@ -218,9 +259,15 @@ def run_scalar_baseline(data, task_name, label_fn=None):
             model.fit(X_tr, y_tr)
             y_pred = model.predict(X_va)
             acc = accuracy_score(y_va, y_pred)
-            f1 = f1_score(y_va, y_pred, average="weighted")
-            results[name] = {"accuracy": acc, "f1_weighted": f1}
-            print(f"    {name:25s}  acc={acc:.3f}  F1={f1:.3f}")
+            f1 = f1_score(y_va, y_pred, average="weighted", zero_division=0)
+            prec = precision_score(y_va, y_pred, average="weighted", zero_division=0)
+            rec = recall_score(y_va, y_pred, average="weighted", zero_division=0)
+            results[name] = {
+                "accuracy": acc, "f1_weighted": f1,
+                "precision": prec, "recall": rec,
+            }
+            print(f"    {name:25s}  acc={acc:.3f}  F1={f1:.3f}  "
+                  f"P={prec:.3f}  R={rec:.3f}")
         except Exception as e:
             print(f"    {name:25s}  FAILED — {e}")
 
@@ -275,17 +322,60 @@ def phase1(run_name):
 
 
 # ═══════════════════════════════════════════════════════════
+#  TEMPORAL ATTENTION BLOCK (optional, for EEG-Conformer-style models)
+# ═══════════════════════════════════════════════════════════
+
+class TemporalAttentionBlock(nn.Module):
+    """Lightweight multi-head self-attention over the time dimension.
+
+    Inserted between EEGNet block1 and block2. Input shape from block1:
+    (B, F1*D, 1, T_reduced) -> reshape to (B, T, F1*D) for attention.
+    """
+
+    def __init__(self, embed_dim, n_heads=2, ff_dim=None, dropout=0.1):
+        super().__init__()
+        if ff_dim is None:
+            ff_dim = embed_dim * 4
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.attn = nn.MultiheadAttention(
+            embed_dim, n_heads, dropout=dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(embed_dim, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, embed_dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        B, C, _, T = x.shape
+        x = x.squeeze(2).permute(0, 2, 1)  # (B, T, C)
+        normed = self.norm1(x)
+        x = x + self.attn(normed, normed, normed)[0]
+        x = x + self.ff(self.norm2(x))
+        return x.permute(0, 2, 1).unsqueeze(2)  # (B, C, 1, T)
+
+
+# ═══════════════════════════════════════════════════════════
 #  EEGNET MODEL
 # ═══════════════════════════════════════════════════════════
 
 class EEGNet(nn.Module):
-    """Compact CNN for EEG decoding (Lawhern et al., 2018)."""
+    """Compact CNN for EEG decoding (Lawhern et al., 2018).
+
+    Extended with configurable kernel sizes and optional transformer layer.
+    """
 
     def __init__(self, n_channels, n_times, n_classes,
-                 F1=8, D=2, F2=16, dropout=0.25):
+                 F1=8, D=2, F2=16, dropout=0.25,
+                 kernel_length=64, sep_kernel_length=16,
+                 use_transformer=False, n_heads=2,
+                 transformer_dropout=0.1):
         super().__init__()
         self.block1 = nn.Sequential(
-            nn.Conv2d(1, F1, (1, 64), padding=(0, 32), bias=False),
+            nn.Conv2d(1, F1, (1, kernel_length),
+                      padding=(0, kernel_length // 2), bias=False),
             nn.BatchNorm2d(F1),
             nn.Conv2d(F1, F1 * D, (n_channels, 1), groups=F1, bias=False),
             nn.BatchNorm2d(F1 * D),
@@ -293,8 +383,17 @@ class EEGNet(nn.Module):
             nn.AvgPool2d((1, 4)),
             nn.Dropout(dropout),
         )
+
+        if use_transformer:
+            self.transformer = TemporalAttentionBlock(
+                embed_dim=F1 * D, n_heads=n_heads,
+                ff_dim=F1 * D * 4, dropout=transformer_dropout)
+        else:
+            self.transformer = None
+
         self.block2 = nn.Sequential(
-            nn.Conv2d(F1 * D, F2, (1, 16), padding=(0, 8), bias=False),
+            nn.Conv2d(F1 * D, F2, (1, sep_kernel_length),
+                      padding=(0, sep_kernel_length // 2), bias=False),
             nn.BatchNorm2d(F2),
             nn.ELU(),
             nn.AvgPool2d((1, 8)),
@@ -302,25 +401,28 @@ class EEGNet(nn.Module):
         )
         dummy = torch.zeros(1, 1, n_channels, n_times)
         with torch.no_grad():
-            out = self.block2(self.block1(dummy))
+            out = self.block1(dummy)
+            if self.transformer is not None:
+                out = self.transformer(out)
+            out = self.block2(out)
         self.flat_size = out.numel()
         self.classifier = nn.Linear(self.flat_size, n_classes)
 
-    def forward(self, x):
+    def _features(self, x):
         if x.dim() == 3:
             x = x.unsqueeze(1)
         x = self.block1(x)
+        if self.transformer is not None:
+            x = self.transformer(x)
         x = self.block2(x)
-        x = x.flatten(1)
-        return self.classifier(x)
+        return x.flatten(1)
+
+    def forward(self, x):
+        return self.classifier(self._features(x))
 
     def embed(self, x):
         """Return the pre-classifier embedding."""
-        if x.dim() == 3:
-            x = x.unsqueeze(1)
-        x = self.block1(x)
-        x = self.block2(x)
-        return x.flatten(1)
+        return self._features(x)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -331,9 +433,13 @@ class MultimodalNet(nn.Module):
     """Dual-branch: EEGNet for EEG + small CNN for ET, late fusion."""
 
     def __init__(self, n_eeg_ch, n_et_ch, n_times, n_classes,
-                 F1=8, D=2, F2=16, dropout=0.25):
+                 F1=8, D=2, F2=16, dropout=0.25, **eeg_kwargs):
         super().__init__()
-        self.eeg_branch = EEGNet(n_eeg_ch, n_times, n_classes, F1, D, F2, dropout)
+        self.eeg_branch = EEGNet(
+            n_eeg_ch, n_times, n_classes, F1=F1, D=D, F2=F2, dropout=dropout,
+            **{k: v for k, v in eeg_kwargs.items()
+               if k in ("kernel_length", "sep_kernel_length",
+                         "use_transformer", "n_heads", "transformer_dropout")})
         self.eeg_branch.classifier = nn.Identity()
 
         self.et_branch = nn.Sequential(
@@ -354,9 +460,9 @@ class MultimodalNet(nn.Module):
         dummy_eeg = torch.zeros(1, 1, n_eeg_ch, n_times)
         dummy_et = torch.zeros(1, 1, n_et_ch, n_times)
         with torch.no_grad():
-            eeg_out = self.eeg_branch.block2(self.eeg_branch.block1(dummy_eeg))
+            eeg_out = self.eeg_branch._features(dummy_eeg)
             et_out = self.et_branch(dummy_et)
-        self.eeg_flat = eeg_out.numel()
+        self.eeg_flat = eeg_out.shape[1]
         self.et_flat = et_out.numel()
 
         self.classifier = nn.Sequential(
@@ -367,13 +473,10 @@ class MultimodalNet(nn.Module):
         )
 
     def forward(self, x_eeg, x_et):
-        if x_eeg.dim() == 3:
-            x_eeg = x_eeg.unsqueeze(1)
         if x_et.dim() == 3:
             x_et = x_et.unsqueeze(1)
 
-        eeg_feat = self.eeg_branch.block2(
-            self.eeg_branch.block1(x_eeg)).flatten(1)
+        eeg_feat = self.eeg_branch._features(x_eeg)
         et_feat = self.et_branch(x_et).flatten(1)
         fused = torch.cat([eeg_feat, et_feat], dim=1)
         return self.classifier(fused)
@@ -511,8 +614,11 @@ def train_dl_model(model, X_train, X_val, y_train, y_val,
         model.load_state_dict(best_state)
 
     print(f"\n  Best val acc: {best_val_acc:.3f}")
-    f1 = f1_score(best_targets, best_preds, average="weighted")
-    print(f"  Best val F1 (weighted): {f1:.3f}")
+    f1 = f1_score(best_targets, best_preds, average="weighted", zero_division=0)
+    prec = precision_score(best_targets, best_preds, average="weighted", zero_division=0)
+    rec = recall_score(best_targets, best_preds, average="weighted", zero_division=0)
+    bal_acc = balanced_accuracy_score(best_targets, best_preds)
+    print(f"  Best val F1 (weighted): {f1:.3f}  Precision: {prec:.3f}  Recall: {rec:.3f}")
     labels = sorted(np.unique(np.concatenate([y_train, y_val])))
     print(classification_report(
         best_targets, best_preds, labels=labels, zero_division=0))
@@ -524,18 +630,24 @@ def train_dl_model(model, X_train, X_val, y_train, y_val,
                    os.path.join(save_dir, f"{safe_name}.pt"))
         print(f"  Saved: {save_dir}/{safe_name}.pt")
 
-    return model, {"accuracy": best_val_acc, "f1_weighted": f1}
+    return model, {
+        "accuracy": best_val_acc, "balanced_accuracy": bal_acc,
+        "f1_weighted": f1, "precision": prec, "recall": rec,
+    }
 
 
 # ═══════════════════════════════════════════════════════════
 #  PHASE 2 — EEGNET
 # ═══════════════════════════════════════════════════════════
 
-def phase2(run_name):
+def phase2(run_name, cfg=None):
     print("\n" + "=" * 60)
     print("  PHASE 2 — EEGNet")
     print("=" * 60)
 
+    cfg = cfg or {}
+    ekw = _eegnet_kwargs(cfg)
+    tkw = _training_kwargs(cfg)
     conditions = discover_conditions(run_name)
     if not conditions:
         print("  No conditions found — skipping phase 2")
@@ -557,11 +669,13 @@ def phase2(run_name):
         n_times = data["X_eeg_train"].shape[2]
         n_classes = len(np.unique(data["y_train"]))
 
-        model = EEGNet(n_ch, n_times, n_classes)
+        model = EEGNet(n_ch, n_times, n_classes, **ekw)
         _, res = train_dl_model(
             model,
             data["X_eeg_train"], data["X_eeg_val"],
             data["y_train"], data["y_val"],
+            n_epochs=tkw["n_epochs"], batch_size=tkw["batch_size"],
+            lr=tkw["lr"],
             task_name=f"EEGNet_{cond}",
             save_dir=save_dir,
         )
@@ -580,11 +694,13 @@ def phase2(run_name):
     n_times = data_pooled["X_eeg_train"].shape[2]
     n_classes = len(np.unique(data_pooled["y_train"]))
 
-    model = EEGNet(n_ch, n_times, n_classes)
+    model = EEGNet(n_ch, n_times, n_classes, **ekw)
     _, res = train_dl_model(
         model,
         data_pooled["X_eeg_train"], data_pooled["X_eeg_val"],
         data_pooled["y_train"], data_pooled["y_val"],
+        n_epochs=tkw["n_epochs"], batch_size=tkw["batch_size"],
+        lr=tkw["lr"],
         task_name="EEGNet_pooled",
         save_dir=save_dir,
     )
@@ -597,11 +713,14 @@ def phase2(run_name):
 #  PHASE 3 — MULTIMODAL (EEG + ET)
 # ═══════════════════════════════════════════════════════════
 
-def phase3(run_name):
+def phase3(run_name, cfg=None):
     print("\n" + "=" * 60)
     print("  PHASE 3 — MULTIMODAL (EEG + ET)")
     print("=" * 60)
 
+    cfg = cfg or {}
+    ekw = _eegnet_kwargs(cfg)
+    tkw = _training_kwargs(cfg)
     conditions = discover_conditions(run_name)
     if not conditions:
         print("  No conditions found — skipping phase 3")
@@ -624,13 +743,15 @@ def phase3(run_name):
     print(f"  EEG: {n_eeg_ch} ch × {n_times} t")
     print(f"  ET:  {n_et_ch} ch × {n_times} t")
 
-    model = MultimodalNet(n_eeg_ch, n_et_ch, n_times, n_classes)
+    model = MultimodalNet(n_eeg_ch, n_et_ch, n_times, n_classes, **ekw)
     _, res = train_dl_model(
         model,
         data_pooled["X_eeg_train"], data_pooled["X_eeg_val"],
         data_pooled["y_train"], data_pooled["y_val"],
         X_et_train=data_pooled["X_et_train"],
         X_et_val=data_pooled["X_et_val"],
+        n_epochs=tkw["n_epochs"], batch_size=tkw["batch_size"],
+        lr=tkw["lr"],
         task_name="Multimodal_pooled",
         save_dir=save_dir,
     )
@@ -643,13 +764,15 @@ def phase3(run_name):
         print(f"\n{'─' * 40}")
         print(f"  Condition: {cond}")
         print(f"{'─' * 40}")
-        model = MultimodalNet(n_eeg_ch, n_et_ch, n_times, n_classes)
+        model = MultimodalNet(n_eeg_ch, n_et_ch, n_times, n_classes, **ekw)
         _, res = train_dl_model(
             model,
             data["X_eeg_train"], data["X_eeg_val"],
             data["y_train"], data["y_val"],
             X_et_train=data["X_et_train"],
             X_et_val=data["X_et_val"],
+            n_epochs=tkw["n_epochs"], batch_size=tkw["batch_size"],
+            lr=tkw["lr"],
             task_name=f"Multimodal_{cond}",
             save_dir=save_dir,
         )
@@ -678,11 +801,14 @@ def _label_hit_vs_miss(meta):
     return pd.Series(y, index=meta.index), mask
 
 
-def phase4(run_name):
+def phase4(run_name, cfg=None):
     print("\n" + "=" * 60)
     print("  PHASE 4 — OUTCOME PREDICTION")
     print("=" * 60)
 
+    cfg = cfg or {}
+    ekw = _eegnet_kwargs(cfg)
+    tkw = _training_kwargs(cfg)
     conditions = discover_conditions(run_name)
     if not conditions:
         print("  No conditions found — skipping phase 4")
@@ -723,9 +849,11 @@ def phase4(run_name):
 
     if len(np.unique(y_tr)) >= 2 and len(np.unique(y_va)) >= 2:
         n_ch, n_times = X_tr.shape[1], X_tr.shape[2]
-        model = EEGNet(n_ch, n_times, 2)
+        model = EEGNet(n_ch, n_times, 2, **ekw)
         _, res = train_dl_model(
             model, X_tr, X_va, y_tr, y_va,
+            n_epochs=tkw["n_epochs"], batch_size=tkw["batch_size"],
+            lr=tkw["lr"],
             task_name="EEGNet_correct_vs_error",
             save_dir=save_dir,
         )
@@ -747,9 +875,11 @@ def phase4(run_name):
     y_va = y_va_hm[mask_va].values
 
     if len(np.unique(y_tr)) >= 2 and len(np.unique(y_va)) >= 2:
-        model = EEGNet(n_ch, n_times, 2)
+        model = EEGNet(n_ch, n_times, 2, **ekw)
         _, res = train_dl_model(
             model, X_tr, X_va, y_tr, y_va,
+            n_epochs=tkw["n_epochs"], batch_size=tkw["batch_size"],
+            lr=tkw["lr"],
             task_name="EEGNet_hit_vs_miss",
             save_dir=save_dir,
         )
@@ -778,10 +908,12 @@ def phase4(run_name):
             n_et_ch = X_et_tr.shape[1]
             n_times = X_eeg_tr.shape[2]
 
-            model = MultimodalNet(n_eeg_ch, n_et_ch, n_times, 2)
+            model = MultimodalNet(n_eeg_ch, n_et_ch, n_times, 2, **ekw)
             _, res = train_dl_model(
                 model, X_eeg_tr, X_eeg_va, y_tr, y_va,
                 X_et_train=X_et_tr, X_et_val=X_et_va,
+                n_epochs=tkw["n_epochs"], batch_size=tkw["batch_size"],
+                lr=tkw["lr"],
                 task_name="Multimodal_correct_vs_error",
                 save_dir=save_dir,
             )
@@ -887,11 +1019,10 @@ class NoGoFusionNet(nn.Module):
     """EEGNet + GazeSequenceEncoder → late fusion for no-go CR vs FA."""
 
     def __init__(self, n_eeg_ch, n_times, n_categories,
-                 F1=8, D=2, F2=16, eeg_dropout=0.25,
                  gaze_embed_dim=32, gaze_hidden=64, gaze_type="lstm",
-                 fusion_dropout=0.3):
+                 fusion_dropout=0.3, **eeg_kwargs):
         super().__init__()
-        self.eeg_branch = EEGNet(n_eeg_ch, n_times, 2, F1, D, F2, eeg_dropout)
+        self.eeg_branch = EEGNet(n_eeg_ch, n_times, 2, **eeg_kwargs)
         eeg_embed_dim = self.eeg_branch.flat_size
         self.eeg_branch.classifier = nn.Identity()
 
@@ -1172,12 +1303,15 @@ def _nogo_kfold(model_factory, X_eeg, labels, n_folds=5, n_epochs=100,
         except ValueError:
             auc = 0.5
         f1 = f1_score(tgts_a, preds_a, average="binary", zero_division=0)
+        prec = precision_score(tgts_a, preds_a, average="binary", zero_division=0)
+        rec = recall_score(tgts_a, preds_a, average="binary", zero_division=0)
 
-        print(f"      bal_acc={bal_acc:.3f}  AUC={auc:.3f}  F1={f1:.3f}")
+        print(f"      bal_acc={bal_acc:.3f}  AUC={auc:.3f}  F1={f1:.3f}  P={prec:.3f}  R={rec:.3f}")
 
         fold_results.append({
             "fold": fi, "balanced_accuracy": float(bal_acc),
             "auc_roc": float(auc), "f1": float(f1),
+            "precision": float(prec), "recall": float(rec),
             "n_test": len(te_idx),
             "confusion_matrix": confusion_matrix(tgts_a, preds_a, labels=[0, 1]).tolist(),
         })
@@ -1194,7 +1328,7 @@ def _nogo_kfold(model_factory, X_eeg, labels, n_folds=5, n_epochs=100,
         return {"error": "No valid folds completed"}
 
     summary = {}
-    for key in ["balanced_accuracy", "auc_roc", "f1"]:
+    for key in ["balanced_accuracy", "auc_roc", "f1", "precision", "recall"]:
         vals = [r[key] for r in fold_results]
         summary[f"{key}_mean"] = float(np.mean(vals))
         summary[f"{key}_std"] = float(np.std(vals))
@@ -1215,11 +1349,16 @@ def _nogo_kfold(model_factory, X_eeg, labels, n_folds=5, n_epochs=100,
 #  PHASE 6 — NO-GO INHIBITORY CONTROL (EEG-Only)
 # ═══════════════════════════════════════════════════════════
 
-def phase6(run_name):
+def phase6(run_name, cfg=None):
     """Model A: EEGNet on no-go trials (CR vs FA), stratified k-fold."""
     print("\n" + "=" * 60)
     print("  PHASE 6 — NO-GO INHIBITORY CONTROL (EEG-Only)")
     print("=" * 60)
+
+    if cfg is None:
+        cfg = {}
+    ekw = _eegnet_kwargs(cfg)
+    tkw = _training_kwargs(cfg)
 
     nogo = _pool_and_filter_nogo(run_name)
     if nogo is None:
@@ -1229,8 +1368,8 @@ def phase6(run_name):
     n_ch, n_t = X.shape[1], X.shape[2]
 
     results = _nogo_kfold(
-        lambda: EEGNet(n_ch, n_t, 2),
-        X, labels, n_folds=5, n_epochs=100, batch_size=32, patience=10,
+        lambda: EEGNet(n_ch, n_t, 2, **ekw),
+        X, labels, **tkw,
     )
     if "error" in results:
         return results
@@ -1243,6 +1382,10 @@ def phase6(run_name):
           f"± {s['auc_roc_std']:.3f}")
     print(f"    F1:                {s['f1_mean']:.3f} "
           f"± {s['f1_std']:.3f}")
+    print(f"    Precision:         {s['precision_mean']:.3f} "
+          f"± {s['precision_std']:.3f}")
+    print(f"    Recall:            {s['recall_mean']:.3f} "
+          f"± {s['recall_std']:.3f}")
 
     save_dir = os.path.join(RUNS_ROOT, run_name, "models")
     os.makedirs(save_dir, exist_ok=True)
@@ -1259,7 +1402,34 @@ def phase6(run_name):
         torch.save(last["_best_state"],
                    os.path.join(save_dir, "nogo_eeg_best.pt"))
 
-    # Save detailed results for the dashboard
+        # Generate filter visualizations from best model
+        try:
+            from interpret import plot_spatial_filters, plot_temporal_filters, plot_saliency_topomap
+            viz_model = EEGNet(n_ch, n_t, 2, **ekw)
+            viz_model.load_state_dict(last["_best_state"])
+            viz_model.eval()
+
+            filter_dir = os.path.join(RUNS_ROOT, run_name, "plots", "filters")
+            conditions = discover_conditions(run_name)
+            fif_path = None
+            for c in conditions:
+                candidate = os.path.join(
+                    RUNS_ROOT, run_name, "data",
+                    f"sj*_{c}_Features-epo.fif")
+                import glob
+                matches = glob.glob(candidate)
+                if matches:
+                    fif_path = matches[0]
+                    break
+
+            if fif_path:
+                plot_spatial_filters(viz_model, fif_path, filter_dir)
+                plot_temporal_filters(viz_model, 250, filter_dir)
+                plot_saliency_topomap(viz_model, X[:min(50, len(X))],
+                                      fif_path, filter_dir)
+        except Exception as e:
+            print(f"  Filter visualization failed: {e}")
+
     detail = {
         "summary": s,
         "fold_results": [{k: v for k, v in r.items() if k != "_best_state"}
@@ -1270,12 +1440,13 @@ def phase6(run_name):
     with open(os.path.join(RUNS_ROOT, run_name, "nogo_results.json"), "w") as f:
         _json.dump({"phase6": detail}, f, indent=2)
 
-    # Return flat summary for ml_results.json
     return {
         "nogo_eeg_kfold": {
             "balanced_accuracy": s["balanced_accuracy_mean"],
             "auc_roc": s["auc_roc_mean"],
             "f1": s["f1_mean"],
+            "precision": s["precision_mean"],
+            "recall": s["recall_mean"],
             "n_folds": s["n_folds"],
             "n_cr": nogo["n_cr"],
             "n_fa": nogo["n_fa"],
@@ -1288,11 +1459,16 @@ def phase6(run_name):
 #  PHASE 7 — NO-GO INHIBITORY CONTROL (EEG + Gaze Fusion)
 # ═══════════════════════════════════════════════════════════
 
-def phase7(run_name, phase6_results=None):
+def phase7(run_name, phase6_results=None, cfg=None):
     """Model B: EEGNet + CLIP gaze fusion on no-go trials."""
     print("\n" + "=" * 60)
     print("  PHASE 7 — NO-GO INHIBITORY CONTROL (EEG + Gaze Fusion)")
     print("=" * 60)
+
+    if cfg is None:
+        cfg = {}
+    ekw = _eegnet_kwargs(cfg)
+    tkw = _training_kwargs(cfg)
 
     nogo = _pool_and_filter_nogo(run_name)
     if nogo is None:
@@ -1321,7 +1497,8 @@ def phase7(run_name, phase6_results=None):
     def factory():
         m = NoGoFusionNet(n_ch, n_t, n_cats,
                           gaze_embed_dim=32, gaze_hidden=64,
-                          gaze_type="lstm", fusion_dropout=0.3)
+                          gaze_type="lstm", fusion_dropout=0.3,
+                          **ekw)
         if p6_state:
             try:
                 m.load_eegnet_weights(p6_state)
@@ -1330,8 +1507,7 @@ def phase7(run_name, phase6_results=None):
         return m
 
     results = _nogo_kfold(
-        factory, X, labels, n_folds=5, n_epochs=100,
-        batch_size=32, patience=10,
+        factory, X, labels, **tkw,
         X_gaze=X_gaze, is_fusion=True,
     )
     if "error" in results:
@@ -1345,6 +1521,10 @@ def phase7(run_name, phase6_results=None):
           f"± {s['auc_roc_std']:.3f}")
     print(f"    F1:                {s['f1_mean']:.3f} "
           f"± {s['f1_std']:.3f}")
+    print(f"    Precision:         {s['precision_mean']:.3f} "
+          f"± {s['precision_std']:.3f}")
+    print(f"    Recall:            {s['recall_mean']:.3f} "
+          f"± {s['recall_std']:.3f}")
 
     save_dir = os.path.join(RUNS_ROOT, run_name, "models")
     if "embeddings" in results:
@@ -1413,10 +1593,544 @@ def phase7(run_name, phase6_results=None):
             "balanced_accuracy": s["balanced_accuracy_mean"],
             "auc_roc": s["auc_roc_mean"],
             "f1": s["f1_mean"],
+            "precision": s["precision_mean"],
+            "recall": s["recall_mean"],
             "n_folds": s["n_folds"],
         },
         "nogo_comparison": comparison,
     }
+
+
+# ═══════════════════════════════════════════════════════════
+#  PHASE 8 — LOSO CROSS-VALIDATION (Primary RQ)
+# ═══════════════════════════════════════════════════════════
+
+def _load_subject_data(run_dirs):
+    """Load nogo EEG data per subject from their run directories.
+
+    Parameters
+    ----------
+    run_dirs : dict
+        {subject_id: run_name} mapping.
+
+    Returns
+    -------
+    X_all, labels_all, subject_ids_all, meta_all
+    """
+    X_parts, label_parts, sid_parts, meta_parts = [], [], [], []
+    for sj, rn in run_dirs.items():
+        nogo = _pool_and_filter_nogo(rn)
+        if nogo is None:
+            print(f"  Subject {sj}: no valid nogo data in {rn}")
+            continue
+        n = len(nogo["labels"])
+        X_parts.append(nogo["X_eeg"])
+        label_parts.append(nogo["labels"])
+        sid_parts.append(np.full(n, sj, dtype=int))
+        meta_parts.append(nogo["meta"].assign(subject_id=sj))
+        print(f"  Subject {sj}: {n} nogo trials (CR={nogo['n_cr']}, FA={nogo['n_fa']})")
+    if not X_parts:
+        return None, None, None, None
+    return (np.concatenate(X_parts), np.concatenate(label_parts),
+            np.concatenate(sid_parts), pd.concat(meta_parts, ignore_index=True))
+
+
+def _normalize_cross_subject(X_train, X_test):
+    """Channel-wise z-score: fit on train subjects, apply to both."""
+    for ch in range(X_train.shape[1]):
+        mu = X_train[:, ch].mean()
+        sd = X_train[:, ch].std() + 1e-8
+        X_train[:, ch] = (X_train[:, ch] - mu) / sd
+        X_test[:, ch] = (X_test[:, ch] - mu) / sd
+    return X_train, X_test
+
+
+def _loso_train_eval(model_factory, X_train, y_train, X_test, y_test,
+                     n_epochs=100, batch_size=32, lr=1e-3, patience=10,
+                     X_gaze_train=None, X_gaze_test=None, is_fusion=False):
+    """Train and evaluate a single LOSO fold."""
+    device = get_device()
+    if len(np.unique(y_train)) < 2 or len(np.unique(y_test)) < 2:
+        return None
+
+    tr_tensors = [torch.from_numpy(X_train).float()]
+    te_tensors = [torch.from_numpy(X_test).float()]
+    if is_fusion and X_gaze_train is not None:
+        tr_tensors.append(torch.from_numpy(X_gaze_train).float())
+        te_tensors.append(torch.from_numpy(X_gaze_test).float())
+    tr_tensors.append(torch.from_numpy(y_train).long())
+    te_tensors.append(torch.from_numpy(y_test).long())
+
+    train_ld = DataLoader(TensorDataset(*tr_tensors), batch_size=batch_size, shuffle=True)
+    test_ld = DataLoader(TensorDataset(*te_tensors), batch_size=batch_size)
+
+    weights = compute_class_weights(y_train).to(device)
+    criterion = nn.CrossEntropyLoss(weight=weights)
+    model = model_factory().to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_epochs)
+
+    best_loss, best_state, no_imp = float("inf"), None, 0
+    for epoch in range(n_epochs):
+        model.train()
+        for batch in train_ld:
+            if is_fusion:
+                xe, xg, yb = [b.to(device) for b in batch]
+                logits = model(xe, xg)
+            else:
+                xb, yb = batch[0].to(device), batch[-1].to(device)
+                logits = model(xb)
+            loss = criterion(logits, yb)
+            opt.zero_grad(); loss.backward(); opt.step()
+        sched.step()
+
+        model.eval()
+        vloss, vn = 0.0, 0
+        with torch.no_grad():
+            for batch in test_ld:
+                if is_fusion:
+                    xe, xg, yb = [b.to(device) for b in batch]
+                    logits = model(xe, xg)
+                else:
+                    xb, yb = batch[0].to(device), batch[-1].to(device)
+                    logits = model(xb)
+                vloss += criterion(logits, yb).item() * yb.size(0)
+                vn += yb.size(0)
+        vloss /= vn
+        if vloss < best_loss:
+            best_loss = vloss
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            no_imp = 0
+        else:
+            no_imp += 1
+        if no_imp >= patience:
+            break
+
+    if best_state:
+        model.load_state_dict(best_state)
+
+    model.eval()
+    probs_l, preds_l, tgts_l = [], [], []
+    with torch.no_grad():
+        for batch in test_ld:
+            if is_fusion:
+                xe, xg, yb = [b.to(device) for b in batch]
+                logits = model(xe, xg)
+            else:
+                xb, yb = batch[0].to(device), batch[-1].to(device)
+                logits = model(xb)
+            probs_l.extend(torch.softmax(logits, 1)[:, 1].cpu().numpy())
+            preds_l.extend(logits.argmax(1).cpu().numpy())
+            tgts_l.extend(yb.cpu().numpy())
+
+    probs_a, preds_a, tgts_a = np.array(probs_l), np.array(preds_l), np.array(tgts_l)
+    bal_acc = balanced_accuracy_score(tgts_a, preds_a)
+    try:
+        auc = roc_auc_score(tgts_a, probs_a)
+    except ValueError:
+        auc = 0.5
+    return {
+        "balanced_accuracy": float(bal_acc),
+        "auc_roc": float(auc),
+        "f1": float(f1_score(tgts_a, preds_a, average="binary", zero_division=0)),
+        "precision": float(precision_score(tgts_a, preds_a, average="binary", zero_division=0)),
+        "recall": float(recall_score(tgts_a, preds_a, average="binary", zero_division=0)),
+        "n_test": len(tgts_a),
+        "confusion_matrix": confusion_matrix(tgts_a, preds_a, labels=[0, 1]).tolist(),
+        "_best_state": best_state,
+    }
+
+
+def phase8_loso(run_name, cfg=None):
+    """Primary RQ: LOSO cross-validation for EEG-based inhibitory control prediction."""
+    print("\n" + "=" * 60)
+    print("  PHASE 8 — LOSO CROSS-VALIDATION")
+    print("=" * 60)
+
+    if cfg is None:
+        cfg = {}
+    ekw = _eegnet_kwargs(cfg)
+    tkw = _training_kwargs(cfg)
+
+    loso_cfg = cfg.get("loso", {})
+    run_dirs = loso_cfg.get("run_dirs", {})
+    if not run_dirs:
+        print("  No LOSO run_dirs configured in configs/config.yaml")
+        print("  Add loso.run_dirs mapping subject IDs to run names")
+        return {"error": "no_loso_config"}
+
+    run_dirs = {int(k): v for k, v in run_dirs.items()}
+    print(f"  Subjects: {sorted(run_dirs.keys())}")
+
+    X, labels, sids, meta = _load_subject_data(run_dirs)
+    if X is None:
+        return {"error": "no_data"}
+
+    n_ch, n_t = X.shape[1], X.shape[2]
+    subjects = sorted(np.unique(sids))
+    print(f"\n  Total: {len(labels)} trials across {len(subjects)} subjects")
+
+    fold_results = []
+    for held_out in subjects:
+        print(f"\n  --- Held out: subject {held_out} ---")
+        train_mask = sids != held_out
+        test_mask = sids == held_out
+
+        X_tr, X_te = X[train_mask].copy(), X[test_mask].copy()
+        y_tr, y_te = labels[train_mask], labels[test_mask]
+
+        X_tr, X_te = _normalize_cross_subject(X_tr, X_te)
+
+        result = _loso_train_eval(
+            lambda: EEGNet(n_ch, n_t, 2, **ekw),
+            X_tr, y_tr, X_te, y_te, **tkw,
+        )
+        if result is None:
+            print(f"    Skipped — single class in split")
+            continue
+
+        result["held_out_subject"] = int(held_out)
+        result.pop("_best_state", None)
+        fold_results.append(result)
+        print(f"    bal_acc={result['balanced_accuracy']:.3f}  "
+              f"AUC={result['auc_roc']:.3f}  F1={result['f1']:.3f}")
+
+    if not fold_results:
+        return {"error": "no_valid_folds"}
+
+    summary = {"n_folds": len(fold_results)}
+    for key in ["balanced_accuracy", "auc_roc", "f1", "precision", "recall"]:
+        vals = [r[key] for r in fold_results]
+        summary[f"{key}_mean"] = float(np.mean(vals))
+        summary[f"{key}_std"] = float(np.std(vals))
+        summary[f"{key}_values"] = vals
+    cm_list = [np.array(r["confusion_matrix"]) for r in fold_results]
+    summary["confusion_matrix_sum"] = np.sum(cm_list, axis=0).tolist()
+
+    print(f"\n  LOSO Summary ({len(fold_results)} folds):")
+    print(f"    Balanced Accuracy: {summary['balanced_accuracy_mean']:.3f} "
+          f"± {summary['balanced_accuracy_std']:.3f}")
+    print(f"    AUC-ROC:           {summary['auc_roc_mean']:.3f} "
+          f"± {summary['auc_roc_std']:.3f}")
+    print(f"    F1:                {summary['f1_mean']:.3f} "
+          f"± {summary['f1_std']:.3f}")
+
+    # Moderator analysis: attend vs unattend
+    moderator = {}
+    for cond_filter, label in [("attend", "attend"), ("unattend", "unattend")]:
+        cond_folds = []
+        for held_out in subjects:
+            train_mask = sids != held_out
+            test_mask = sids == held_out
+
+            if meta is not None and "condition" in meta.columns:
+                cond_mask = meta["condition"].str.contains(cond_filter, case=False, na=False)
+                tr_mask = train_mask & cond_mask.values
+                te_mask = test_mask & cond_mask.values
+            else:
+                continue
+
+            if tr_mask.sum() < 4 or te_mask.sum() < 2:
+                continue
+
+            X_tr, X_te = X[tr_mask].copy(), X[te_mask].copy()
+            y_tr, y_te = labels[tr_mask], labels[te_mask]
+            X_tr, X_te = _normalize_cross_subject(X_tr, X_te)
+
+            result = _loso_train_eval(
+                lambda: EEGNet(n_ch, n_t, 2, **ekw),
+                X_tr, y_tr, X_te, y_te, **tkw,
+            )
+            if result:
+                cond_folds.append(result)
+
+        if cond_folds:
+            aucs = [r["auc_roc"] for r in cond_folds]
+            moderator[label] = {
+                "auc_roc_mean": float(np.mean(aucs)),
+                "auc_roc_std": float(np.std(aucs)),
+                "n_folds": len(cond_folds),
+            }
+            print(f"\n    {label}: AUC={np.mean(aucs):.3f} ± {np.std(aucs):.3f} "
+                  f"({len(cond_folds)} folds)")
+
+    if len(moderator) == 2:
+        a_vals = [r["auc_roc"] for r in cond_folds]  # last cond_folds
+        att_aucs = moderator.get("attend", {})
+        unatt_aucs = moderator.get("unattend", {})
+        moderator["comparison"] = {
+            "attend_mean": att_aucs.get("auc_roc_mean", 0),
+            "unattend_mean": unatt_aucs.get("auc_roc_mean", 0),
+            "note": "N<6: descriptive only, no significance test" if len(subjects) < 6
+                    else "Wilcoxon paired test recommended with N≥6",
+        }
+
+    out_path = os.path.join(RUNS_ROOT, run_name, "loso_results.json")
+    with open(out_path, "w") as f:
+        json.dump({"summary": summary, "fold_results": fold_results,
+                   "moderator": moderator}, f, indent=2)
+    print(f"\n  Saved: {out_path}")
+
+    return {"loso": summary, "moderator": moderator}
+
+
+# ═══════════════════════════════════════════════════════════
+#  PHASE 9 — GAZE COMPARISON IN WALKING (Secondary RQ)
+# ═══════════════════════════════════════════════════════════
+
+def phase9_gaze_walking(run_name, cfg=None):
+    """Secondary RQ: Does adding semantic gaze improve prediction during walking?"""
+    print("\n" + "=" * 60)
+    print("  PHASE 9 — GAZE COMPARISON (WALKING)")
+    print("=" * 60)
+
+    if cfg is None:
+        cfg = {}
+    ekw = _eegnet_kwargs(cfg)
+    tkw = _training_kwargs(cfg)
+
+    loso_cfg = cfg.get("loso", {})
+    run_dirs = loso_cfg.get("run_dirs", {})
+    if not run_dirs:
+        print("  No LOSO run_dirs configured")
+        return {"error": "no_loso_config"}
+
+    run_dirs = {int(k): v for k, v in run_dirs.items()}
+
+    # Load only walking conditions
+    X_parts, label_parts, sid_parts, meta_parts = [], [], [], []
+    gaze_parts = []
+    has_gaze = True
+    n_cats = len(CLIP_CATEGORIES)
+
+    for sj, rn in run_dirs.items():
+        conditions = discover_conditions(rn)
+        walk_conds = [c for c in conditions if "walk" in c.lower()]
+        if not walk_conds:
+            continue
+
+        for cond in walk_conds:
+            data = load_tensors(rn, cond)
+            for split in ("train", "val"):
+                X_parts.append(data[f"X_eeg_{split}"])
+                label_parts.append(data[f"y_{split}"])
+                n = len(data[f"y_{split}"])
+                sid_parts.append(np.full(n, sj, dtype=int))
+                m = data[f"meta_{split}"].copy()
+                m["subject_id"] = sj
+                m["condition"] = cond
+                meta_parts.append(m)
+
+    if not X_parts:
+        print("  No walking condition data found")
+        return {"error": "no_walk_data"}
+
+    X_all = np.concatenate(X_parts)
+    y_all = np.concatenate(label_parts)
+    sids = np.concatenate(sid_parts)
+    meta_all = pd.concat(meta_parts, ignore_index=True)
+
+    # Filter to nogo CR vs FA
+    if "outcome" not in meta_all.columns:
+        print("  No outcome column")
+        return {"error": "no_outcome"}
+
+    nogo_mask = meta_all.get("trialType", pd.Series(dtype=float)).values == 20
+    if not nogo_mask.any():
+        nogo_mask = y_all == 1
+    outcome = meta_all["outcome"].astype(str).str.upper()
+    cr_fa = nogo_mask & outcome.isin(["CORRECT_REJECTION", "COMMISSION_ERROR"])
+    idx = np.where(cr_fa)[0]
+    if len(idx) < 10:
+        print(f"  Only {len(idx)} nogo walking trials — too few")
+        return {"error": "insufficient_walk_nogo"}
+
+    X = X_all[idx]
+    labels = (meta_all.iloc[idx]["outcome"].str.upper() == "CORRECT_REJECTION").astype(int).values
+    sids_f = sids[idx]
+    meta_f = meta_all.iloc[idx].reset_index(drop=True)
+    n_ch, n_t = X.shape[1], X.shape[2]
+    subjects = sorted(np.unique(sids_f))
+
+    print(f"  Walking nogo trials: {len(labels)} across {len(subjects)} subjects")
+
+    # Model A: EEGNet only
+    model_a_folds = []
+    for held_out in subjects:
+        tr = sids_f != held_out; te = sids_f == held_out
+        X_tr, X_te = X[tr].copy(), X[te].copy()
+        X_tr, X_te = _normalize_cross_subject(X_tr, X_te)
+        r = _loso_train_eval(lambda: EEGNet(n_ch, n_t, 2, **ekw),
+                             X_tr, labels[tr], X_te, labels[te], **tkw)
+        if r:
+            r["held_out"] = int(held_out)
+            model_a_folds.append(r)
+
+    # Model B: NoGoFusionNet (if gaze data available)
+    model_b_folds = []
+    gaze_seqs = _load_clip_gaze_sequences(
+        list(run_dirs.values())[0], meta_f, [])
+    if gaze_seqs is not None:
+        X_gaze = _encode_gaze_onehot(gaze_seqs)
+        for held_out in subjects:
+            tr = sids_f != held_out; te = sids_f == held_out
+            X_tr, X_te = X[tr].copy(), X[te].copy()
+            X_tr, X_te = _normalize_cross_subject(X_tr, X_te)
+            r = _loso_train_eval(
+                lambda: NoGoFusionNet(n_ch, n_t, n_cats,
+                                      gaze_embed_dim=32, gaze_hidden=64,
+                                      gaze_type="lstm", fusion_dropout=0.3, **ekw),
+                X_tr, labels[tr], X_te, labels[te], **tkw,
+                X_gaze_train=X_gaze[tr], X_gaze_test=X_gaze[te],
+                is_fusion=True,
+            )
+            if r:
+                r["held_out"] = int(held_out)
+                model_b_folds.append(r)
+
+    result = {}
+    for name, folds in [("model_a_eeg", model_a_folds), ("model_b_fusion", model_b_folds)]:
+        if folds:
+            aucs = [r["auc_roc"] for r in folds]
+            result[name] = {
+                "auc_roc_mean": float(np.mean(aucs)),
+                "auc_roc_std": float(np.std(aucs)),
+                "n_folds": len(folds),
+                "fold_results": [{k: v for k, v in r.items() if k != "_best_state"}
+                                 for r in folds],
+            }
+            print(f"\n  {name}: AUC={np.mean(aucs):.3f} ± {np.std(aucs):.3f}")
+
+    # Paired comparison
+    if model_a_folds and model_b_folds:
+        n = min(len(model_a_folds), len(model_b_folds))
+        a_aucs = np.array([r["auc_roc"] for r in model_a_folds[:n]])
+        b_aucs = np.array([r["auc_roc"] for r in model_b_folds[:n]])
+        diff = b_aucs - a_aucs
+        comparison = {
+            "n_pairs": n,
+            "a_mean": float(np.mean(a_aucs)),
+            "b_mean": float(np.mean(b_aucs)),
+            "mean_diff": float(np.mean(diff)),
+            "cohens_d": float(np.mean(diff) / (np.std(diff) + 1e-10)),
+        }
+        if n >= 6 and not np.all(diff == 0):
+            try:
+                stat, p = wilcoxon_test(a_aucs, b_aucs)
+                comparison["p_value"] = float(p)
+                comparison["significant"] = p < 0.05
+            except Exception:
+                pass
+        result["comparison"] = comparison
+        print(f"\n  Comparison: A={comparison['a_mean']:.3f} B={comparison['b_mean']:.3f} "
+              f"d={comparison['cohens_d']:.3f}")
+
+    out_path = os.path.join(RUNS_ROOT, run_name, "gaze_comparison_results.json")
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2, default=str)
+    print(f"  Saved: {out_path}")
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════
+#  PHASE 10 — CROSS-CONDITION TRANSFER (Tertiary RQ)
+# ═══════════════════════════════════════════════════════════
+
+def phase10_cross_condition(run_name, cfg=None):
+    """Tertiary RQ: Do lab-learned (sit) signatures generalize to walking?"""
+    print("\n" + "=" * 60)
+    print("  PHASE 10 — CROSS-CONDITION TRANSFER (Sit → Walk)")
+    print("=" * 60)
+
+    if cfg is None:
+        cfg = {}
+    ekw = _eegnet_kwargs(cfg)
+    tkw = _training_kwargs(cfg)
+
+    loso_cfg = cfg.get("loso", {})
+    run_dirs = loso_cfg.get("run_dirs", {})
+    if not run_dirs:
+        print("  No LOSO run_dirs configured")
+        return {"error": "no_loso_config"}
+    run_dirs = {int(k): v for k, v in run_dirs.items()}
+
+    def _load_by_movement(movement):
+        X_parts, y_parts, sid_parts, meta_parts = [], [], [], []
+        for sj, rn in run_dirs.items():
+            conditions = discover_conditions(rn)
+            conds = [c for c in conditions if movement in c.lower()]
+            for cond in conds:
+                data = load_tensors(rn, cond)
+                for split in ("train", "val"):
+                    X_parts.append(data[f"X_eeg_{split}"])
+                    y_parts.append(data[f"y_{split}"])
+                    n = len(data[f"y_{split}"])
+                    sid_parts.append(np.full(n, sj, dtype=int))
+                    m = data[f"meta_{split}"].copy()
+                    m["subject_id"] = sj
+                    meta_parts.append(m)
+        if not X_parts:
+            return None, None, None, None
+        return (np.concatenate(X_parts), np.concatenate(y_parts),
+                np.concatenate(sid_parts),
+                pd.concat(meta_parts, ignore_index=True))
+
+    def _filter_nogo(X, y, meta):
+        if "outcome" not in meta.columns:
+            return None, None
+        nogo_mask = meta.get("trialType", pd.Series(dtype=float)).values == 20
+        if not nogo_mask.any():
+            nogo_mask = y == 1
+        outcome = meta["outcome"].astype(str).str.upper()
+        cr_fa = nogo_mask & outcome.isin(["CORRECT_REJECTION", "COMMISSION_ERROR"])
+        idx = np.where(cr_fa)[0]
+        if len(idx) < 4:
+            return None, None
+        labels = (meta.iloc[idx]["outcome"].str.upper() == "CORRECT_REJECTION").astype(int).values
+        return X[idx], labels
+
+    results = {}
+    for train_cond, test_cond, name in [("sit", "walk", "sit_to_walk"),
+                                         ("walk", "sit", "walk_to_sit")]:
+        print(f"\n  --- Train: {train_cond} → Test: {test_cond} ---")
+        X_train_raw, y_train_raw, _, meta_train = _load_by_movement(train_cond)
+        X_test_raw, y_test_raw, _, meta_test = _load_by_movement(test_cond)
+
+        if X_train_raw is None or X_test_raw is None:
+            print(f"    No data for {train_cond} or {test_cond}")
+            continue
+
+        X_tr, y_tr = _filter_nogo(X_train_raw, y_train_raw, meta_train)
+        X_te, y_te = _filter_nogo(X_test_raw, y_test_raw, meta_test)
+
+        if X_tr is None or X_te is None:
+            print(f"    Insufficient nogo trials")
+            continue
+
+        print(f"    Train: {len(y_tr)} trials  Test: {len(y_te)} trials")
+
+        X_tr, X_te = X_tr.copy(), X_te.copy()
+        X_tr, X_te = _normalize_cross_subject(X_tr, X_te)
+        n_ch, n_t = X_tr.shape[1], X_tr.shape[2]
+
+        r = _loso_train_eval(
+            lambda: EEGNet(n_ch, n_t, 2, **ekw),
+            X_tr, y_tr, X_te, y_te, **tkw,
+        )
+        if r:
+            r.pop("_best_state", None)
+            results[name] = r
+            print(f"    bal_acc={r['balanced_accuracy']:.3f}  "
+                  f"AUC={r['auc_roc']:.3f}  F1={r['f1']:.3f}")
+
+    if results:
+        out_path = os.path.join(RUNS_ROOT, run_name, "cross_condition_results.json")
+        with open(out_path, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\n  Saved: {out_path}")
+
+    return results
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1456,11 +2170,12 @@ def main():
     parser.add_argument("--run", type=str, default=None,
                         help="Run directory name (default: latest)")
     parser.add_argument("--phase", type=int, nargs="+", default=None,
-                        help="Phase(s) to run: 1-5 (default: all)")
+                        help="Phase(s) to run: 1-10 (default: 1-7)")
     args = parser.parse_args()
 
     run_name = args.run or find_latest_run()
     phases = args.phase or [1, 2, 3, 4, 5, 6, 7]
+    cfg = load_model_config()
 
     print(f"\nRun: {run_name}")
     print(f"Phases: {phases}")
@@ -1471,24 +2186,30 @@ def main():
     if 1 in phases:
         all_results["phase1_scalar"] = phase1(run_name)
     if 2 in phases:
-        all_results["phase2_eegnet"] = phase2(run_name)
+        all_results["phase2_eegnet"] = phase2(run_name, cfg=cfg)
     if 3 in phases:
-        all_results["phase3_multimodal"] = phase3(run_name)
+        all_results["phase3_multimodal"] = phase3(run_name, cfg=cfg)
     if 4 in phases:
-        all_results["phase4_outcome"] = phase4(run_name)
+        all_results["phase4_outcome"] = phase4(run_name, cfg=cfg)
     if 5 in phases:
         all_results["phase5_vision"] = phase5(run_name)
     if 6 in phases:
-        p6 = phase6(run_name)
+        p6 = phase6(run_name, cfg=cfg)
         all_results["phase6_nogo_eeg"] = {
             k: v for k, v in p6.items() if not k.startswith("_")}
         _p6_ref = p6
     else:
         _p6_ref = None
     if 7 in phases:
-        p7 = phase7(run_name, _p6_ref)
+        p7 = phase7(run_name, _p6_ref, cfg=cfg)
         all_results["phase7_nogo_fusion"] = {
             k: v for k, v in p7.items() if not k.startswith("_")}
+    if 8 in phases:
+        all_results["phase8_loso"] = phase8_loso(run_name, cfg=cfg)
+    if 9 in phases:
+        all_results["phase9_gaze_walking"] = phase9_gaze_walking(run_name, cfg=cfg)
+    if 10 in phases:
+        all_results["phase10_cross_condition"] = phase10_cross_condition(run_name, cfg=cfg)
 
     save_summary(run_name, all_results)
 

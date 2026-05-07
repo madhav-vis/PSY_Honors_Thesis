@@ -53,7 +53,6 @@ MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 
 st.set_page_config(
     page_title="Gaze Crop Tool",
-    page_icon="👁",
     layout="wide",
 )
 
@@ -148,7 +147,7 @@ def _get_all_pairs_with_crops():
 # ── Sidebar ───────────────────────────────────────────────────
 
 with st.sidebar:
-    st.title("👁 Gaze Crop Tool")
+    st.title("Gaze Crop Tool")
 
     labeler_id_input = st.text_input(
         "Your name / labeler ID",
@@ -185,7 +184,7 @@ with st.sidebar:
 # ── Main tabs ─────────────────────────────────────────────────
 
 t_gen, t_label, t_stats, t_train, t_eval = st.tabs([
-    "🗂 Generate Crops", "🏷 Label", "📊 Statistics", "🧠 Train", "📋 Evaluate"
+    "Generate Crops", "Label", "Statistics", "Train", "Evaluate"
 ])
 
 

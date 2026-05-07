@@ -58,6 +58,7 @@ def prepare_dl_data(sj_num, cond, test_size=0.2, random_state=42):
     X_eeg = _epochs_to_tensor(epochs)
     meta = (epochs.metadata.copy().reset_index(drop=True)
             if epochs.metadata is not None else pd.DataFrame())
+    meta["subject_id"] = sj_num
 
     if "trialType" in meta.columns:
         y = (meta["trialType"].values == 20).astype(int)  # 0=go, 1=nogo
@@ -99,6 +100,11 @@ def prepare_dl_data(sj_num, cond, test_size=0.2, random_state=42):
         assert X_et.shape[0] == X_eeg.shape[0], (
             f"ET/EEG trial count mismatch: "
             f"ET={X_et.shape[0]}, EEG={X_eeg.shape[0]}"
+        )
+        assert X_et.shape[2] == X_eeg.shape[2], (
+            f"ET/EEG timescale mismatch: "
+            f"ET has {X_et.shape[2]} timepoints, EEG has {X_eeg.shape[2]}. "
+            f"Both must be interpolated to the same sampling rate and epoch window."
         )
         print(f"    ET tensor: {X_et.shape}")
 

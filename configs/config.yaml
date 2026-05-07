@@ -47,6 +47,11 @@ model:
     D: 2
     F2: 16
     dropout: 0.5
+    kernel_length: 64
+    sep_kernel_length: 16
+    use_transformer: false
+    transformer_heads: 2
+    transformer_dropout: 0.1
   gaze_encoder:
     embedding_dim: 32
     hidden_dim: 64
@@ -60,6 +65,13 @@ training:
   epochs: 100
   early_stopping_patience: 10
   random_seed: 42
+
+loso:
+  enabled: true
+  subjects: [3, 4]
+  run_dirs:
+    3: "2026-04-27_1546_sj03_all_cond_test"
+    4: "2026-04-27_1216_sj04_walk_pilot"
 
 flags:
   run_generalization: false
