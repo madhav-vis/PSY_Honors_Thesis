@@ -59,9 +59,29 @@ def find_latest_run():
 
 
 def load_tensors(run_name, condition):
-    """Load pre-built tensors and metadata for a single condition."""
+    """Load pre-built tensors and metadata for a single condition.
+
+    Returns None if any required file (EEG tensors, labels, metadata) is
+    missing — callers must handle the None case.
+    """
     tensor_dir = os.path.join(RUNS_ROOT, run_name, "data", "dl_tensors")
     prefix = condition
+
+    if not os.path.isdir(tensor_dir):
+        print(f"  [load_tensors] Missing tensor directory: {tensor_dir}")
+        return None
+
+    required_files = []
+    for split in ("train", "val"):
+        required_files.append(f"{prefix}_X_eeg_{split}.npy")
+        required_files.append(f"{prefix}_y_{split}.npy")
+        required_files.append(f"{prefix}_meta_{split}.csv")
+
+    for fname in required_files:
+        fpath = os.path.join(tensor_dir, fname)
+        if not os.path.exists(fpath):
+            print(f"  [load_tensors] Missing required file: {fname}")
+            return None
 
     data = {}
     for split in ("train", "val"):
@@ -82,6 +102,9 @@ def load_tensors(run_name, condition):
 def discover_conditions(run_name):
     """Find all condition prefixes in a run's dl_tensors dir."""
     tensor_dir = os.path.join(RUNS_ROOT, run_name, "data", "dl_tensors")
+    if not os.path.isdir(tensor_dir):
+        print(f"  [discover_conditions] Tensor directory not found: {tensor_dir}")
+        return []
     prefixes = set()
     for f in os.listdir(tensor_dir):
         if f.endswith("_X_eeg_train.npy"):
@@ -90,10 +113,17 @@ def discover_conditions(run_name):
 
 
 def pool_conditions(run_name, conditions):
-    """Stack data across conditions, adding a condition column to metadata."""
+    """Stack data across conditions, adding a condition column to metadata.
+
+    Skips conditions whose tensors are missing. Returns an empty dict if no
+    conditions have valid data.
+    """
     pooled = {}
     for i, cond in enumerate(conditions):
         d = load_tensors(run_name, cond)
+        if d is None:
+            print(f"  [pool_conditions] Skipping {cond} — missing tensors")
+            continue
         for split in ("train", "val"):
             d[f"meta_{split}"]["_condition"] = cond
             d[f"meta_{split}"]["_cond_idx"] = i
@@ -101,6 +131,9 @@ def pool_conditions(run_name, conditions):
                 full_key = f"{key}_{split}"
                 if full_key in d:
                     pooled.setdefault(full_key, []).append(d[full_key])
+
+    if not pooled:
+        return {}
 
     result = {}
     for key, parts in pooled.items():
@@ -209,6 +242,10 @@ def phase1(run_name):
     print("=" * 60)
 
     conditions = discover_conditions(run_name)
+    if not conditions:
+        print("  No conditions found — skipping phase 1")
+        return {}
+
     all_results = {}
 
     for cond in conditions:
@@ -216,11 +253,18 @@ def phase1(run_name):
         print(f"  Condition: {cond}")
         print(f"{'─' * 40}")
         data = load_tensors(run_name, cond)
+        if data is None:
+            print(f"  Skipping {cond} — missing tensors")
+            continue
 
         all_results[f"{cond}_gonogo"] = run_scalar_baseline(
             data, f"Go vs NoGo ({cond})")
 
     data_pooled = pool_conditions(run_name, conditions)
+    if not data_pooled:
+        print("  No valid conditions for pooling — skipping pooled baseline")
+        return all_results
+
     print(f"\n{'─' * 40}")
     print(f"  Pooled ({len(conditions)} conditions)")
     print(f"{'─' * 40}")
@@ -493,6 +537,10 @@ def phase2(run_name):
     print("=" * 60)
 
     conditions = discover_conditions(run_name)
+    if not conditions:
+        print("  No conditions found — skipping phase 2")
+        return {}
+
     results = {}
     save_dir = os.path.join(RUNS_ROOT, run_name, "models")
 
@@ -501,6 +549,9 @@ def phase2(run_name):
         print(f"  Condition: {cond}")
         print(f"{'─' * 40}")
         data = load_tensors(run_name, cond)
+        if data is None:
+            print(f"  Skipping {cond} — missing tensors")
+            continue
 
         n_ch = data["X_eeg_train"].shape[1]
         n_times = data["X_eeg_train"].shape[2]
@@ -517,6 +568,10 @@ def phase2(run_name):
         results[cond] = res
 
     data_pooled = pool_conditions(run_name, conditions)
+    if not data_pooled:
+        print("  No valid conditions for pooling — skipping pooled EEGNet")
+        return results
+
     print(f"\n{'─' * 40}")
     print(f"  Pooled ({len(conditions)} conditions)")
     print(f"{'─' * 40}")
@@ -548,12 +603,16 @@ def phase3(run_name):
     print("=" * 60)
 
     conditions = discover_conditions(run_name)
+    if not conditions:
+        print("  No conditions found — skipping phase 3")
+        return {}
+
     results = {}
     save_dir = os.path.join(RUNS_ROOT, run_name, "models")
 
     data_pooled = pool_conditions(run_name, conditions)
 
-    if "X_et_train" not in data_pooled:
+    if not data_pooled or "X_et_train" not in data_pooled:
         print("  No ET tensors found — skipping multimodal phase")
         return results
 
@@ -579,7 +638,7 @@ def phase3(run_name):
 
     for cond in conditions:
         data = load_tensors(run_name, cond)
-        if "X_et_train" not in data:
+        if data is None or "X_et_train" not in data:
             continue
         print(f"\n{'─' * 40}")
         print(f"  Condition: {cond}")
@@ -625,7 +684,15 @@ def phase4(run_name):
     print("=" * 60)
 
     conditions = discover_conditions(run_name)
+    if not conditions:
+        print("  No conditions found — skipping phase 4")
+        return {}
+
     data_pooled = pool_conditions(run_name, conditions)
+    if not data_pooled:
+        print("  No valid conditions for pooling — skipping phase 4")
+        return {}
+
     results = {}
     save_dir = os.path.join(RUNS_ROOT, run_name, "models")
 
@@ -739,7 +806,14 @@ def phase5(run_name):
     print("=" * 60)
 
     conditions = discover_conditions(run_name)
+    if not conditions:
+        print("  No conditions found — skipping phase 5")
+        return {}
+
     data_pooled = pool_conditions(run_name, conditions)
+    if not data_pooled:
+        print("  No valid conditions for pooling — skipping phase 5")
+        return {}
 
     meta_tr = data_pooled["meta_train"]
     vis_cols = [c for c in VISION_SCALAR_FEATURES if c in meta_tr.columns]
@@ -860,14 +934,24 @@ CLIP_CATEGORIES = [
 def _pool_and_filter_nogo(run_name):
     """Pool all conditions, merge train+val, filter to no-go CR vs FA."""
     conditions = discover_conditions(run_name)
+    if not conditions:
+        print("  No conditions found")
+        return None
 
     X_all, y_all, meta_all = [], [], []
     for cond in conditions:
         data = load_tensors(run_name, cond)
+        if data is None:
+            print(f"  Skipping {cond} — missing tensors")
+            continue
         for split in ("train", "val"):
             X_all.append(data[f"X_eeg_{split}"])
             y_all.append(data[f"y_{split}"])
             meta_all.append(data[f"meta_{split}"])
+
+    if not X_all:
+        print("  No valid conditions loaded")
+        return None
 
     X_eeg = np.concatenate(X_all)
     y_gonogo = np.concatenate(y_all)
