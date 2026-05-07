@@ -106,6 +106,79 @@ def _et_folder_map():
         return {}
 
 
+@st.cache_data(ttl=300)
+def _load_epochs_cached(epo_path):
+    """Cache-friendly epoch loader — returns serializable dicts instead of MNE objects."""
+    epochs = mne.read_epochs(epo_path, preload=True, verbose=False)
+    meta = epochs.metadata
+    return {
+        "data": epochs.get_data(),
+        "times": epochs.times,
+        "ch_names": list(epochs.ch_names),
+        "metadata": meta.to_dict("list") if meta is not None else None,
+        "events": epochs.events,
+    }
+
+
+def _cached_metadata(ep):
+    """Reconstruct a DataFrame from the cached dict representation."""
+    if ep["metadata"] is None:
+        return None
+    return pd.DataFrame(ep["metadata"])
+
+
+@st.cache_data(ttl=600)
+def _load_or_build_erp_cache(rn, sj, conds_tuple):
+    """Load precomputed ERP summaries from disk, or build + persist them."""
+    cache_path = os.path.join(data_dir(rn), f"dashboard_cache_sj{sj:02d}.json")
+    if os.path.exists(cache_path):
+        with open(cache_path) as f:
+            return json.load(f)
+
+    cache = {"erp_by_cell": {}, "errors": [], "missing": []}
+    for cond in conds_tuple:
+        epo_path = os.path.join(data_dir(rn), f"sj{sj:02d}_{cond}_Features-epo.fif")
+        if not os.path.exists(epo_path):
+            cache["missing"].append(cond)
+            continue
+        try:
+            ep = _load_epochs_cached(epo_path)
+            data_ep = ep["data"]
+            if len(data_ep) == 0:
+                cache["errors"].append(f"{cond}: empty")
+                continue
+            ch = "Pz" if "Pz" in ep["ch_names"] else ep["ch_names"][0]
+            ch_i = ep["ch_names"].index(ch)
+            meta = _cached_metadata(ep)
+            if meta is not None and "trialType" in meta.columns:
+                raw = pd.to_numeric(meta["trialType"], errors="coerce").to_numpy(dtype=float)
+            else:
+                raw = ep["events"][:, 2].astype(float)
+            go_idx = np.flatnonzero(raw == 10.0)
+            nogo_idx = np.flatnonzero(raw == 20.0)
+            if len(go_idx) == 0 and len(nogo_idx) == 0:
+                cache["errors"].append(f"{cond}: no Go/NoGo trials")
+                continue
+            cell = _condition_grid_label(cond)
+            cache["erp_by_cell"][cell] = {
+                "times_ms": (ep["times"] * 1000.0).tolist(),
+                "go": (data_ep[go_idx, ch_i, :].mean(0) * 1e6).tolist() if len(go_idx) else None,
+                "nogo": (data_ep[nogo_idx, ch_i, :].mean(0) * 1e6).tolist() if len(nogo_idx) else None,
+                "n_go": int(len(go_idx)),
+                "n_nogo": int(len(nogo_idx)),
+            }
+        except Exception as e:
+            cache["errors"].append(f"{cond}: {e}")
+
+    try:
+        with open(cache_path, "w") as f:
+            json.dump(cache, f)
+    except Exception:
+        pass
+    return cache
+
+
+@st.cache_data(ttl=120)
 def find_subjects_conditions(rn):
     dd = data_dir(rn)
     if not os.path.isdir(dd):
@@ -164,6 +237,17 @@ def _go_nogo_indices_from_epochs(epochs):
     go_idx = np.flatnonzero(codes == 10.0)
     nogo_idx = np.flatnonzero(codes == 20.0)
     return go_idx, nogo_idx
+
+
+def _go_nogo_indices_from_cached(ep):
+    """Same as _go_nogo_indices_from_epochs but for cached dict."""
+    meta = _cached_metadata(ep)
+    if meta is not None and "trialType" in meta.columns:
+        raw = meta["trialType"].to_numpy()
+    else:
+        raw = ep["events"][:, 2]
+    codes = pd.to_numeric(pd.Series(raw), errors="coerce").to_numpy(dtype=float)
+    return np.flatnonzero(codes == 10.0), np.flatnonzero(codes == 20.0)
 
 
 def _build_movement_behavior_rows(features_df, cond_label):
@@ -424,40 +508,13 @@ with tab_overview:
         # ── 2×2 ERP Grid (Go vs NoGo, Attend/Unattend × Sit/Walk) ────
         st.subheader("Go vs NoGo ERPs — Pz")
 
-        erp_by_cell = {}
-        erp_load_errors = []
-        missing_feature_epo = []
-        for cond in conditions:
-            epo_path = os.path.join(
-                data_dir(selected_run),
-                f"sj{sj_num:02d}_{cond}_Features-epo.fif",
-            )
-            if not os.path.exists(epo_path):
-                missing_feature_epo.append((cond, epo_path))
-                continue
-            try:
-                epochs = mne.read_epochs(epo_path, preload=True, verbose=False)
-                if len(epochs) == 0:
-                    erp_load_errors.append(f"{cond}: empty Features-epo.fif")
-                    continue
-                ch = "Pz" if "Pz" in epochs.ch_names else epochs.ch_names[0]
-                ch_i = epochs.ch_names.index(ch)
-                data_ep = epochs.get_data()
-                go_idx, nogo_idx = _go_nogo_indices_from_epochs(epochs)
-                if len(go_idx) == 0 and len(nogo_idx) == 0:
-                    erp_load_errors.append(
-                        f"{cond}: no trials with trialType 10/20"
-                    )
-                    continue
-                erp_by_cell[_condition_grid_label(cond)] = {
-                    "times_ms": epochs.times * 1000.0,
-                    "go": data_ep[go_idx, ch_i, :].mean(axis=0) * 1e6 if len(go_idx) else None,
-                    "nogo": data_ep[nogo_idx, ch_i, :].mean(axis=0) * 1e6 if len(nogo_idx) else None,
-                    "n_go": int(len(go_idx)),
-                    "n_nogo": int(len(nogo_idx)),
-                }
-            except Exception as exc:
-                erp_load_errors.append(f"{cond}: {exc}")
+        erp_cache = _load_or_build_erp_cache(
+            selected_run, sj_num, tuple(conditions))
+        erp_by_cell = erp_cache["erp_by_cell"]
+        erp_load_errors = erp_cache.get("errors", [])
+        missing_feature_epo = [
+            (c, f"sj{sj_num:02d}_{c}_Features-epo.fif")
+            for c in erp_cache.get("missing", [])]
 
         cell_order = ["Attend Sit", "Unattend Sit", "Attend Walk", "Unattend Walk"]
 
@@ -1365,17 +1422,15 @@ with tab_nogo:
 
             for cond in conditions:
                 try:
-                    import mne
                     epo_path = os.path.join(
                         data_dir(selected_run),
                         f"sj{sj_num:02d}_{cond}_Features-epo.fif")
                     if not os.path.exists(epo_path):
                         continue
-                    epochs = mne.read_epochs(epo_path, preload=True,
-                                             verbose=False)
-                    if epochs.metadata is None:
+                    ep = _load_epochs_cached(epo_path)
+                    meta = _cached_metadata(ep)
+                    if meta is None:
                         continue
-                    meta = epochs.metadata
                     if "outcome" not in meta.columns:
                         continue
 
@@ -1391,14 +1446,14 @@ with tab_nogo:
 
                     pz_i = None
                     for ch in ["Pz", "CPz", "Cz"]:
-                        if ch in epochs.ch_names:
-                            pz_i = epochs.ch_names.index(ch)
+                        if ch in ep["ch_names"]:
+                            pz_i = ep["ch_names"].index(ch)
                             break
                     if pz_i is None:
                         pz_i = 0
 
-                    edata = epochs.get_data()
-                    times = epochs.times * 1000
+                    edata = ep["data"]
+                    times = ep["times"] * 1000
                     import plotly.graph_objects as _pgo2
 
                     fig_erp = _pgo2.Figure()
@@ -1422,7 +1477,7 @@ with tab_nogo:
                     fig_erp.add_vline(x=0, line_dash="dash",
                                       line_color="gray")
                     fig_erp.update_layout(
-                        title=f"{cond} — {epochs.ch_names[pz_i]}",
+                        title=f"{cond} — {ep['ch_names'][pz_i]}",
                         xaxis_title="Time (ms)",
                         yaxis_title="Amplitude (µV)",
                         height=350, template="plotly_white",
