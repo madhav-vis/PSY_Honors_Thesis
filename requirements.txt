@@ -24,10 +24,12 @@ streamlit>=1.30
 # Embeddings
 umap-learn>=0.5
 
+# Progress bars
+tqdm>=4.60
+
 # Vision / CLIP (for gaze classification pipeline)
 # git+https://github.com/openai/CLIP.git
 # ftfy
 # regex
 # opencv-python
 # Pillow
-# tqdm

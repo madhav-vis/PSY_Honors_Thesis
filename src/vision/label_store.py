@@ -328,6 +328,22 @@ def get_crop_dir(sj_num: int, condition: str) -> str:
     return os.path.join(CROPS_BASE, f"sj{sj_num:02d}_{condition}")
 
 
+def crops_exist(sj_num: int, condition: str) -> int:
+    """Return count of .png files in the stable crop directory, or 0 if missing."""
+    crop_dir = get_crop_dir(sj_num, condition)
+    if not os.path.isdir(crop_dir):
+        return 0
+    return sum(1 for f in os.listdir(crop_dir) if f.lower().endswith(".png"))
+
+
+def list_crop_files(sj_num: int, condition: str) -> list:
+    """Return sorted list of crop filenames in the stable crop directory."""
+    crop_dir = get_crop_dir(sj_num, condition)
+    if not os.path.isdir(crop_dir):
+        return []
+    return sorted(f for f in os.listdir(crop_dir) if f.lower().endswith(".png"))
+
+
 def get_crop_path(sj_num: int, condition: str, filename: str) -> str:
     return os.path.join(get_crop_dir(sj_num, condition), filename)
 

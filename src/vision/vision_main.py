@@ -27,6 +27,8 @@ from vision.config import (
     get_world_video_path,
 )
 from vision.label_store import (
+    crops_exist,
+    get_crop_dir,
     load_labels_for,
     mirror_crops_dir,
 )
@@ -105,40 +107,50 @@ def _world_video_dir_from_run_dir(run_dir):
     return cfg.get("data", {}).get("world_video_dir", None)
 
 
-def _process_condition(sj_num, condition, run_dir, classifier, world_video_dir=None):
-    """Run all vision pipeline phases for one subject × condition."""
+def generate_crops_for_condition(
+    sj_num,
+    condition,
+    world_video_dir=None,
+    force=False,
+    progress_cb=None,
+):
+    """Generate gaze crops and save to data/crops/. Returns (crop_dir, n_crops).
+
+    Skips if crops already exist in stable storage unless force=True.
+    progress_cb(phase_name, current, total, message) for UI updates.
+    """
     label = condition
+    stable_dir = get_crop_dir(sj_num, label)
+
+    n_existing = crops_exist(sj_num, label)
+    if n_existing > 0 and not force:
+        msg = f"Using {n_existing} cached crops from data/crops/sj{sj_num:02d}_{label}/"
+        print(f"    {msg}")
+        if progress_cb:
+            progress_cb("Crops", 1, 1, msg)
+        return stable_dir, n_existing
+
     eye_dir = get_eye_dir(_PROJECT_ROOT, sj_num, label)
     video_path = get_world_video_path(sj_num, label, world_video_dir)
-    vision_dir = get_vision_out_dir(run_dir, sj_num, label)
 
-    # Clean slate: wipe any previous vision output for this condition
-    if os.path.isdir(vision_dir):
-        shutil.rmtree(vision_dir)
-        print(f"    Cleared previous vision cache: {vision_dir}")
-    frames_dir = os.path.join(vision_dir, "frames")
-    crops_dir = os.path.join(vision_dir, "crops")
-    os.makedirs(frames_dir, exist_ok=True)
-    os.makedirs(crops_dir, exist_ok=True)
-
-    results_csv = os.path.join(vision_dir, f"sj{sj_num:02d}_{label}_vision_results.csv")
-
-    # ── PHASE 1: Load Data ──
     fix_path = os.path.join(eye_dir, "fixations.csv")
     gaze_path = os.path.join(eye_dir, "gaze_positions.csv")
 
     if not os.path.exists(fix_path):
         print(f"    Missing fixations: {fix_path}")
-        return None
+        return stable_dir, 0
     if not os.path.exists(gaze_path):
         print(f"    Missing gaze: {gaze_path}")
-        return None
+        return stable_dir, 0
     if not video_path:
         print(f"    No world-video mapping for condition: {label}")
-        return None
+        return stable_dir, 0
     if not os.path.exists(video_path):
         print(f"    Missing world video: {video_path}")
-        return None
+        return stable_dir, 0
+
+    if progress_cb:
+        progress_cb("Load data", 0, 3, "Reading fixations and gaze data...")
 
     fixations = pd.read_csv(fix_path)
     gaze_df = pd.read_csv(gaze_path)
@@ -153,20 +165,17 @@ def _process_condition(sj_num, condition, run_dir, classifier, world_video_dir=N
         fixations = fixations.head(MAX_FIXATIONS).reset_index(drop=True)
         print(f"    Capped to first {MAX_FIXATIONS} fixations (TEST mode)")
 
-    # Build arrays once to avoid iterrows float64 precision loss
     fix_ids = fixations["fixation id"].values
     mid_ns_arr = fixations["mid_ns"].values
     start_ns_arr = fixations["start timestamp [ns]"].values
     end_ns_arr = fixations["end timestamp [ns]"].values
-
-    # Map mid_ns → fixation index for fast lookup after frame extraction
     midns_to_idx = {int(mid_ns_arr[i]): i for i in range(len(mid_ns_arr))}
 
-    # ── PHASE 2: Extract Frames ──
+    if progress_cb:
+        progress_cb("Extract frames", 1, 3, f"Extracting frames from world video ({len(fixations)} fixations)...")
+
     print("    Extracting frames from world video...")
-    ts_frames = extract_frames_at_timestamps(
-        video_path, gaze_df, mid_ns_arr
-    )
+    ts_frames = extract_frames_at_timestamps(video_path, gaze_df, mid_ns_arr)
     frames_by_fid = {}
     for ts_ns, frame in ts_frames.items():
         idx = midns_to_idx.get(ts_ns)
@@ -174,10 +183,12 @@ def _process_condition(sj_num, condition, run_dir, classifier, world_video_dir=N
             continue
         fid = int(fix_ids[idx])
         frames_by_fid[fid] = frame
-        cv2.imwrite(os.path.join(frames_dir, f"{fid}_{ts_ns}.jpg"), frame)
     print(f"    Extracted {len(frames_by_fid)} frames")
 
-    # ── PHASE 3: Extract Gaze Crops ──
+    if progress_cb:
+        progress_cb("Gaze crops", 2, 3, f"Cropping {len(frames_by_fid)} gaze regions...")
+
+    os.makedirs(stable_dir, exist_ok=True)
     print("    Extracting gaze crops...")
     n_saved = 0
     n_skipped = 0
@@ -204,17 +215,78 @@ def _process_condition(sj_num, condition, run_dir, classifier, world_video_dir=N
             continue
 
         cv2.imwrite(
-            os.path.join(crops_dir, f"{fid}_{ts_ns}.png"),
+            os.path.join(stable_dir, f"{fid}_{ts_ns}.png"),
             crop[:, :, ::-1],
         )
         n_saved += 1
 
     print(f"    Saved {n_saved} crops ({n_skipped} skipped — gaze outside frame or no samples)")
 
-    # Mirror crops to stable data/crops/ so labels survive pipeline re-runs
-    n_mirrored = mirror_crops_dir(crops_dir, sj_num, label)
-    if n_mirrored:
-        print(f"    Mirrored {n_mirrored} new crops → data/crops/sj{sj_num:02d}_{label}/")
+    if progress_cb:
+        progress_cb("Gaze crops", 3, 3, f"Done — {n_saved} crops saved to data/crops/")
+
+    return stable_dir, n_saved
+
+
+def _process_condition(sj_num, condition, run_dir, classifier, world_video_dir=None):
+    """Run all vision pipeline phases for one subject × condition."""
+    label = condition
+    eye_dir = get_eye_dir(_PROJECT_ROOT, sj_num, label)
+    video_path = get_world_video_path(sj_num, label, world_video_dir)
+    vision_dir = get_vision_out_dir(run_dir, sj_num, label)
+
+    # Clear non-crop artifacts from previous runs (CSVs, embeddings, frames)
+    # but preserve crops in stable storage
+    if os.path.isdir(vision_dir):
+        for item in os.listdir(vision_dir):
+            item_path = os.path.join(vision_dir, item)
+            if item == "crops":
+                # Remove old run-local crops dir (symlink or real dir)
+                if os.path.islink(item_path):
+                    os.unlink(item_path)
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+            elif os.path.isdir(item_path):
+                shutil.rmtree(item_path)
+            else:
+                os.remove(item_path)
+
+    frames_dir = os.path.join(vision_dir, "frames")
+    os.makedirs(frames_dir, exist_ok=True)
+
+    # Generate or reuse cached crops from stable storage
+    stable_crop_dir, n_crops = generate_crops_for_condition(
+        sj_num, condition, world_video_dir=world_video_dir
+    )
+
+    if n_crops == 0:
+        print("    No crops available — skipping remaining phases")
+        return None
+
+    # Symlink run-dir crops to stable storage so downstream phases find them
+    crops_dir = os.path.join(vision_dir, "crops")
+    if not os.path.exists(crops_dir):
+        os.symlink(stable_crop_dir, crops_dir)
+
+    results_csv = os.path.join(vision_dir, f"sj{sj_num:02d}_{label}_vision_results.csv")
+
+    # Load fixation/gaze data for classification metadata
+    fix_path = os.path.join(eye_dir, "fixations.csv")
+    gaze_path = os.path.join(eye_dir, "gaze_positions.csv")
+
+    if not os.path.exists(fix_path) or not os.path.exists(gaze_path):
+        print(f"    Missing fixation/gaze data for classification metadata")
+        return None
+
+    fixations = pd.read_csv(fix_path)
+    gaze_df = pd.read_csv(gaze_path)
+    fixations = fixations[fixations["duration [ms]"] >= MIN_FIXATION_MS].reset_index(drop=True)
+    fixations["mid_ns"] = (
+        (fixations["start timestamp [ns]"] + fixations["end timestamp [ns]"]) // 2
+    ).astype(np.int64)
+
+    if MAX_FIXATIONS is not None:
+        fixations = fixations.head(MAX_FIXATIONS).reset_index(drop=True)
 
     # ── PHASE 4: CLIP Classification ──
     crop_files = sorted(f for f in os.listdir(crops_dir) if f.endswith(".png"))
@@ -612,11 +684,22 @@ def run(run_dir_override=None):
     print(f"Conditions:      {run_conditions}")
     print(f"World video dir: {world_video_dir or '(not set — video-dependent phases will be skipped)'}")
 
-    for sj_num in run_subjects:
-        for condition in run_conditions:
+    # Build flat list of (sj, cond) pairs for progress tracking
+    _pairs = [(sj, cond) for sj in run_subjects for cond in run_conditions]
+    _total_pairs = len(_pairs)
+
+    for _pair_idx, (sj_num, condition) in enumerate(_pairs):
             print(f"\n{'='*60}")
             print(f"  Vision Pipeline — sj{sj_num:02d} {condition}")
             print(f"{'='*60}")
+
+            try:
+                from pipeline_progress import write_progress
+                write_progress(the_run_dir, f"sj{sj_num:02d}_{condition}",
+                               "running", _pair_idx, _total_pairs,
+                               f"Processing sj{sj_num:02d} {condition}...")
+            except ImportError:
+                pass
 
             results_df = _process_condition(sj_num, condition, the_run_dir, classifier,
                                             world_video_dir=world_video_dir)
@@ -647,6 +730,14 @@ def run(run_dir_override=None):
             print(f"  {s['condition']:20s}  fixations={s['n_fixations']:5d}  "
                   f"top3=[{s['top_3']}]  mean_conf={s['mean_conf']}  "
                   f"trials={s['n_trials_with_vision']}")
+
+    try:
+        from pipeline_progress import write_progress, clear_progress
+        write_progress(the_run_dir, "complete", "done",
+                       _total_pairs, _total_pairs, "Vision pipeline complete!")
+        clear_progress(the_run_dir)
+    except ImportError:
+        pass
 
     print("\nVision pipeline complete!")
 

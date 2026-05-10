@@ -16,6 +16,7 @@ import sys
 import numpy as np
 import pandas as pd
 import streamlit as st
+import yaml
 
 _SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SRC_DIR not in sys.path:
@@ -29,6 +30,7 @@ from vision.label_store import (
     available_subjects_conditions,
     cohens_kappa_matrix,
     crop_status_grid,
+    crops_exist,
     get_crop_dir,
     get_crop_path,
     inter_rater_overlaps,
@@ -44,6 +46,7 @@ from vision.label_store import (
     scan_data_subjects,
     subject_condition_counts,
 )
+from vision.vision_main import generate_crops_for_condition
 
 LABEL_NAMES = list(CATEGORIES.keys())
 RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
@@ -193,13 +196,36 @@ t_gen, t_label, t_stats, t_train, t_eval = st.tabs([
 # ═══════════════════════════════════════════════════════════════
 
 with t_gen:
-    st.header("Crop Generation Status")
-    st.markdown(
-        "This tab shows what crop data exists per subject × condition, "
-        "and what source files are available to generate crops. "
-        "Run the vision pipeline (phases 1–2) via the **Run Manager** in the main dashboard, "
-        "or from the command line."
-    )
+    st.header("Crop Generation")
+
+    # ── Config editor ──
+    _cfg_path = os.path.join(PROJECT_ROOT, "src", "run_config.yaml")
+
+    with st.expander("Pipeline Config (run_config.yaml)", expanded=False):
+        try:
+            with open(_cfg_path) as _f:
+                _cfg_raw = _f.read()
+        except FileNotFoundError:
+            _cfg_raw = ""
+            st.warning(f"Config file not found: {_cfg_path}")
+
+        if _cfg_raw:
+            _cfg_edited = st.text_area(
+                "Edit config (YAML)", value=_cfg_raw, height=300,
+                help="Key fields for crop generation: data.subjects, data.world_video_dir, conditions, et.folder_map",
+            )
+            if st.button("Save Config"):
+                try:
+                    yaml.safe_load(_cfg_edited)  # validate
+                    with open(_cfg_path, "w") as _f:
+                        _f.write(_cfg_edited)
+                    st.success("Config saved!")
+                    st.cache_data.clear()
+                except yaml.YAMLError as _e:
+                    st.error(f"Invalid YAML: {_e}")
+
+    # ── Status grid ──
+    st.subheader("Status")
 
     try:
         status_df = crop_status_grid()
@@ -236,18 +262,81 @@ with t_gen:
         st.markdown(f"**{total_crops}** total crops across all subjects.  "
                     f"**{labeled_total}** labeled ({labeled_total/max(total_crops,1)*100:.1f}%).")
 
+    # ── Generate controls ──
     st.markdown("---")
-    st.subheader("How to generate crops")
-    st.code(
-        "# From repo root — runs frame extraction + gaze cropping for all configured subjects\n"
-        "python src/vision/vision_main.py\n\n"
-        "# Or via the main dashboard's Run Manager tab\n"
-        "streamlit run src/dashboard.py",
-        language="bash",
-    )
+    st.subheader("Generate Crops")
+
+    if not status_df.empty:
+        # Build selectable pairs: only those with video + fixations available
+        _generable = status_df[status_df["has_video"] & status_df["has_fixations"]]
+        _gen_options = [
+            f"sj{int(r['subject_id']):02d} — {r['condition']}  ({int(r['n_crops'])} crops)"
+            for _, r in _generable.iterrows()
+        ]
+        _gen_selected = st.multiselect(
+            "Subject / condition pairs to generate",
+            options=_gen_options,
+            default=_gen_options,
+            help="Only pairs with world video + fixations.csv available are shown.",
+        )
+
+        _col1, _col2 = st.columns(2)
+        _force_regen = _col1.checkbox("Force regenerate (overwrite existing crops)")
+        _gen_button = _col2.button("Generate Crops", type="primary",
+                                    disabled=len(_gen_selected) == 0)
+
+        if _gen_button:
+            # Read world_video_dir from config
+            _wvd = None
+            try:
+                with open(_cfg_path) as _f:
+                    _cfg = yaml.safe_load(_f)
+                _wvd = _cfg.get("data", {}).get("world_video_dir")
+            except Exception:
+                pass
+
+            # Parse selected pairs back to (sj_num, condition)
+            _pairs = []
+            for sel in _gen_selected:
+                sj_str = sel.split(" — ")[0]
+                cond_str = sel.split(" — ")[1].split("  (")[0]
+                _pairs.append((int(sj_str[2:]), cond_str))
+
+            with st.status(f"Generating crops for {len(_pairs)} pair(s)...", expanded=True) as _status:
+                _prog = st.progress(0.0)
+                _msg = st.empty()
+
+                for _pi, (_sj, _cond) in enumerate(_pairs):
+                    _pair_label = f"sj{_sj:02d}_{_cond}"
+                    _msg.markdown(f"**{_pair_label}** — starting...")
+
+                    def _crop_cb(phase, cur, tot, text, _pl=_pair_label, _idx=_pi, _total=len(_pairs)):
+                        _overall = (_idx + cur / max(tot, 1)) / _total
+                        _prog.progress(min(_overall, 1.0))
+                        _msg.markdown(f"**{_pl}** — {phase}: {text}")
+
+                    try:
+                        _dir, _n = generate_crops_for_condition(
+                            _sj, _cond,
+                            world_video_dir=_wvd,
+                            force=_force_regen,
+                            progress_cb=_crop_cb,
+                        )
+                        _msg.markdown(f"**{_pair_label}** — {_n} crops")
+                    except Exception as _e:
+                        st.error(f"Error generating crops for {_pair_label}: {_e}")
+
+                _prog.progress(1.0)
+                _status.update(label="Crop generation complete!", state="complete")
+
+            st.cache_data.clear()
+            st.rerun()
+    else:
+        st.info("No subject data found. Add data directories under `data/sj{NN}/`.")
+
     st.info(
         "**Required per subject/condition**: world video file + `fixations.csv` "
-        "(or `gaze_positions.csv`) in `data/sj{N}/eye/{Condition}/`. "
+        "+ `gaze_positions.csv` in `data/sj{N}/eye/{Condition}/`. "
         "EEG behavioral files are only needed for trial-level EEG fusion, "
         "not for crop generation or vision model training."
     )

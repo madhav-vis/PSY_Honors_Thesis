@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,7 @@ import mne
 from plotly.subplots import make_subplots
 
 import et_viz
+from pipeline_progress import read_progress, clear_progress
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
@@ -439,54 +441,82 @@ with tab_run:
         if "pipeline_running" not in st.session_state:
             st.session_state.pipeline_running = False
 
-        if run_main and not st.session_state.pipeline_running:
+        def _run_pipeline_with_progress(cmd, label, progress_run_dir, timeout_s):
+            """Run a pipeline subprocess with live progress bar polling."""
             st.session_state.pipeline_running = True
             st.session_state.pipeline_log = ""
-            cmd = [VENV_PYTHON, os.path.join(PROJECT_ROOT, "src", "main.py"),
-                   "all"]
-            with st.spinner("Running EEG/ET pipeline..."):
+
+            with st.status(f"Running {label}...", expanded=True) as status:
+                progress_bar = st.progress(0.0)
+                status_text = st.empty()
+                log_placeholder = st.empty()
+
                 try:
-                    result = subprocess.run(
-                        cmd, capture_output=True, text=True, timeout=1800,
-                        cwd=PROJECT_ROOT,
+                    process = subprocess.Popen(
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, cwd=PROJECT_ROOT,
                     )
-                    st.session_state.pipeline_log = result.stdout + result.stderr
-                    if result.returncode == 0:
-                        st.success("Pipeline completed!")
+                    start_time = time.time()
+                    log_lines = []
+
+                    while process.poll() is None:
+                        if time.time() - start_time > timeout_s:
+                            process.kill()
+                            st.error(f"{label} timed out ({timeout_s // 60} min limit)")
+                            break
+
+                        if progress_run_dir:
+                            prog = read_progress(progress_run_dir)
+                            if prog:
+                                frac = prog["current"] / max(prog["total"], 1)
+                                progress_bar.progress(min(frac, 1.0))
+                                status_text.markdown(f"**{prog['step']}** — {prog['message']}")
+
+                        time.sleep(1.0)
+
+                    remaining, _ = process.communicate()
+                    if remaining:
+                        log_lines.append(remaining)
+                    full_log = "".join(log_lines)
+                    st.session_state.pipeline_log = full_log
+
+                    if process.returncode == 0:
+                        progress_bar.progress(1.0)
+                        status.update(label=f"{label} completed!", state="complete")
                     else:
-                        st.error(f"Pipeline failed (exit code {result.returncode})")
-                except subprocess.TimeoutExpired:
-                    st.error("Pipeline timed out (30 min limit)")
+                        status.update(label=f"{label} failed (exit {process.returncode})", state="error")
                 except Exception as e:
                     st.error(f"Error: {e}")
                 finally:
                     st.session_state.pipeline_running = False
+                    if progress_run_dir:
+                        clear_progress(progress_run_dir)
                     st.cache_data.clear()
 
+        if run_main and not st.session_state.pipeline_running:
+            cmd = [VENV_PYTHON, os.path.join(PROJECT_ROOT, "src", "main.py"),
+                   "all"]
+            # Run dir is created by config.py at import time — read it from config
+            _eeg_run_dir = None
+            try:
+                with open(CONFIG_PATH) as _f:
+                    _cfg = yaml.safe_load(_f)
+                _run_name = _cfg.get("run_name", "")
+                _date = _cfg.get("date", "auto")
+                if _date == "auto":
+                    import datetime
+                    _date = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
+                _eeg_run_dir = os.path.join(RUNS_ROOT, f"{_date}_{_run_name}")
+            except Exception:
+                pass
+            _run_pipeline_with_progress(cmd, "EEG/ET pipeline", _eeg_run_dir, 1800)
+
         if run_vision and not st.session_state.pipeline_running:
-            st.session_state.pipeline_running = True
-            st.session_state.pipeline_log = ""
+            _vision_run_dir = run_dir(selected_run) if selected_run else ""
             cmd = [VENV_PYTHON,
                    os.path.join(PROJECT_ROOT, "src", "vision", "vision_main.py"),
-                   "--run-dir", run_dir(selected_run) if selected_run else ""]
-            with st.spinner("Running vision pipeline..."):
-                try:
-                    result = subprocess.run(
-                        cmd, capture_output=True, text=True, timeout=3600,
-                        cwd=PROJECT_ROOT,
-                    )
-                    st.session_state.pipeline_log = result.stdout + result.stderr
-                    if result.returncode == 0:
-                        st.success("Vision pipeline completed!")
-                    else:
-                        st.error(f"Vision pipeline failed (exit code {result.returncode})")
-                except subprocess.TimeoutExpired:
-                    st.error("Vision pipeline timed out (60 min limit)")
-                except Exception as e:
-                    st.error(f"Error: {e}")
-                finally:
-                    st.session_state.pipeline_running = False
-                    st.cache_data.clear()
+                   "--run-dir", _vision_run_dir]
+            _run_pipeline_with_progress(cmd, "Vision pipeline", _vision_run_dir, 3600)
 
         if st.session_state.pipeline_log:
             with st.expander("Pipeline Output", expanded=True):

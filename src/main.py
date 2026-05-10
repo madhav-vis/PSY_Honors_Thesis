@@ -37,11 +37,26 @@ class TeeStream:
         return self.buf.getvalue()
 
 
+_PROGRESS_RUN_DIR = None
+_PROGRESS_STEP_IDX = 0
+_PROGRESS_TOTAL = 6
+
+
 def run_step(name, module_run):
+    global _PROGRESS_STEP_IDX
+    _PROGRESS_STEP_IDX += 1
     print(f"\n{'='*60}")
     print(f"  STEP: {name}")
     print(f"{'='*60}")
+    if _PROGRESS_RUN_DIR:
+        from pipeline_progress import write_progress
+        write_progress(_PROGRESS_RUN_DIR, name, "running",
+                       _PROGRESS_STEP_IDX, _PROGRESS_TOTAL, f"Running {name}...")
     module_run()
+    if _PROGRESS_RUN_DIR:
+        from pipeline_progress import write_progress
+        write_progress(_PROGRESS_RUN_DIR, name, "complete",
+                       _PROGRESS_STEP_IDX, _PROGRESS_TOTAL, f"{name} complete")
 
 
 def run_all():
@@ -112,6 +127,9 @@ def main():
             SFREQ_TARGET, FILTER_LOW, FILTER_HIGH, TARGET_CHANNELS,
             USE_GEDAI,
         )
+        global _PROGRESS_RUN_DIR, _PROGRESS_STEP_IDX
+        _PROGRESS_RUN_DIR = RUN_DIR
+        _PROGRESS_STEP_IDX = 0
         print(f"\n{'='*60}")
         print(f"  RUN CONFIG")
         print(f"{'='*60}")
@@ -146,10 +164,11 @@ def main():
         sys.stdout = tee_stdout.real
         sys.stderr = tee_stderr.real
 
-        # Resolve run dir from config (imported lazily to avoid side effects)
         try:
             from config import RUN_DIR
             save_log(tee_stdout, tee_stderr, RUN_DIR)
+            from pipeline_progress import clear_progress
+            clear_progress(RUN_DIR)
         except Exception as e:
             print(f"Warning: could not save log — {e}")
 
