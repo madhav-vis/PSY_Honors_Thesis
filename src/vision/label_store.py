@@ -293,6 +293,18 @@ def crop_status_grid() -> pd.DataFrame:
     subjects = scan_data_subjects()
     data_root = os.path.join(PROJECT_ROOT, "data")
 
+    # Read world_video_dir from run config so we can detect videos
+    world_video_dir = None
+    cfg_path = os.path.join(PROJECT_ROOT, "src", "run_config.yaml")
+    if os.path.exists(cfg_path):
+        try:
+            import yaml
+            with open(cfg_path) as f:
+                cfg = yaml.safe_load(f)
+            world_video_dir = cfg.get("data", {}).get("world_video_dir")
+        except Exception:
+            pass
+
     rows = []
     for sj in subjects:
         for cond in all_conditions:
@@ -306,7 +318,7 @@ def crop_status_grid() -> pd.DataFrame:
             has_fixations = os.path.exists(os.path.join(et_dir, "fixations.csv"))
             has_gaze = os.path.exists(os.path.join(et_dir, "gaze_positions.csv"))
 
-            video_path = get_world_video_path(sj, cond)
+            video_path = get_world_video_path(sj, cond, world_video_dir)
             has_video = video_path is not None and os.path.exists(video_path)
 
             rows.append({
