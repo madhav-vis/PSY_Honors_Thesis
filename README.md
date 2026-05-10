@@ -1,6 +1,5 @@
-# PSY197B — Mobile EEG + Eye-Tracking Pipeline
-
-Research pipeline for studying inhibitory control (Go/NoGo task) under movement (sit/walk) and attention (attend/unattend) conditions using mobile EEG and Pupil Labs eye tracking.
+# PSY197 — Mobile EEG + Eye-Tracking Pipeline
+Code for UCSB Psychology Honors Thesis. Contents include a research pipeline for studying inhibitory control (Go/NoGo task) under movement (sit/walk) and attention (attend/unattend) conditions using mobile EEG and Pupil Labs eye tracking.
 
 ## Pipeline
 
