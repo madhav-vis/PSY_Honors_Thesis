@@ -336,9 +336,7 @@ with t_gen:
 
     st.info(
         "**Required per subject/condition**: world video file + `fixations.csv` "
-        "+ `gaze_positions.csv` in `data/sj{N}/eye/{Condition}/`. "
-        "EEG behavioral files are only needed for trial-level EEG fusion, "
-        "not for crop generation or vision model training."
+        "+ `gaze_positions.csv` in `data/sj{N}/eye/{Condition}/`."
     )
 
 

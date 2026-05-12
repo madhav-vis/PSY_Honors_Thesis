@@ -90,11 +90,14 @@ def load_first_timestamp_s(path):
 
 
 def _project_data_root():
+    env = os.environ.get("PSY197B_DATA_DIR")
+    if env:
+        return env
     try:
         with open(CONFIG_PATH, "r") as f:
             cfg = yaml.safe_load(f)
-        rel = cfg.get("data", {}).get("root", "data")
-        return os.path.join(PROJECT_ROOT, rel)
+        root = cfg.get("data", {}).get("root", "data")
+        return root if os.path.isabs(root) else os.path.join(PROJECT_ROOT, root)
     except Exception:
         return os.path.join(PROJECT_ROOT, "data")
 

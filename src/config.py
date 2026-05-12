@@ -32,8 +32,9 @@ with open(_config_snapshot, "w") as f:
     f.write(f"# Snapshot taken at {datetime.now().isoformat()}\n")
     f.write(_raw_yaml)
 
-# Data
-DATA_DIR = os.path.join(PROJECT_ROOT, CFG["data"]["root"])
+# Data — env var > YAML value; YAML can be absolute or relative to PROJECT_ROOT
+_data_root = os.environ.get("PSY197B_DATA_DIR") or CFG["data"]["root"]
+DATA_DIR = _data_root if os.path.isabs(_data_root) else os.path.join(PROJECT_ROOT, _data_root)
 SUBJECTS = CFG["data"]["subjects"]
 
 # Conditions
