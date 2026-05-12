@@ -19,6 +19,7 @@ import pandas as pd
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _SRC_DIR = os.path.dirname(_THIS_DIR)
 PROJECT_ROOT = os.path.dirname(_SRC_DIR)
+_RUN_CONFIG_PATH = os.path.join(PROJECT_ROOT, "src", "run_config.yaml")
 
 LABELS_CSV = os.path.join(PROJECT_ROOT, "data", "human_labels.csv")
 CROPS_BASE = os.path.join(PROJECT_ROOT, "data", "crops")
@@ -267,9 +268,31 @@ def cohens_kappa_matrix() -> pd.DataFrame:
 
 # ── Data directory scanning ───────────────────────────────────
 
+def _load_run_config() -> dict:
+    """Parse src/run_config.yaml; returns empty dict if missing or invalid."""
+    if not os.path.isfile(_RUN_CONFIG_PATH):
+        return {}
+    try:
+        import yaml
+        with open(_RUN_CONFIG_PATH, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        return cfg if isinstance(cfg, dict) else {}
+    except Exception:
+        return {}
+
+
+def data_root_from_config() -> str:
+    """Return the absolute path that contains sj* folders, per run_config.yaml data.root."""
+    cfg = _load_run_config()
+    data_cfg = cfg.get("data", {})
+    root = data_cfg.get("root", "data") if isinstance(data_cfg, dict) else "data"
+    # os.path.join ignores PROJECT_ROOT when root is already absolute (e.g. C:/...)
+    return os.path.normpath(os.path.join(PROJECT_ROOT, root))
+
+
 def scan_data_subjects() -> list[int]:
-    """Return sorted list of subject numbers found in data/sj* directories."""
-    data_root = os.path.join(PROJECT_ROOT, "data")
+    """Return sorted list of subject numbers found in sj* dirs under the configured data root."""
+    data_root = data_root_from_config()
     subjects = []
     if not os.path.isdir(data_root):
         return subjects
@@ -287,23 +310,17 @@ def crop_status_grid() -> pd.DataFrame:
 
     Columns: subject_id, condition, n_crops, has_video, has_fixations, has_gaze
     """
-    from vision.config import ET_FOLDER_MAP, get_world_video_path
+    from vision.config import VISION_ET_FOLDER_MAP, get_world_video_path
 
-    all_conditions = list(ET_FOLDER_MAP.keys())
+    all_conditions = list(VISION_ET_FOLDER_MAP.keys())
     subjects = scan_data_subjects()
-    data_root = os.path.join(PROJECT_ROOT, "data")
+    data_root = data_root_from_config()
 
-    # Read world_video_dir from run config so we can detect videos
+    cfg = _load_run_config()
     world_video_dir = None
-    cfg_path = os.path.join(PROJECT_ROOT, "src", "run_config.yaml")
-    if os.path.exists(cfg_path):
-        try:
-            import yaml
-            with open(cfg_path) as f:
-                cfg = yaml.safe_load(f)
-            world_video_dir = cfg.get("data", {}).get("world_video_dir")
-        except Exception:
-            pass
+    data_cfg = cfg.get("data", {})
+    if isinstance(data_cfg, dict):
+        world_video_dir = data_cfg.get("world_video_dir")
 
     rows = []
     for sj in subjects:
@@ -313,7 +330,7 @@ def crop_status_grid() -> pd.DataFrame:
             if os.path.isdir(crop_dir):
                 n_crops = sum(1 for f in os.listdir(crop_dir) if f.lower().endswith(".png"))
 
-            et_folder = ET_FOLDER_MAP[cond]
+            et_folder = VISION_ET_FOLDER_MAP[cond]
             et_dir = os.path.join(data_root, f"sj{sj:02d}", "eye", et_folder)
             has_fixations = os.path.exists(os.path.join(et_dir, "fixations.csv"))
             has_gaze = os.path.exists(os.path.join(et_dir, "gaze_positions.csv"))

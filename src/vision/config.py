@@ -1,5 +1,50 @@
 import os
 
+import yaml
+
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_SRC_DIR = os.path.dirname(_THIS_DIR)
+_PROJECT_ROOT = os.path.dirname(_SRC_DIR)
+_RUN_CONFIG_PATH = os.path.join(_SRC_DIR, "run_config.yaml")
+
+
+def _load_vision_config() -> tuple[dict, list]:
+    """Read et.folder_map and vision_conditions from run_config.yaml.
+
+    Returns:
+        (et_folder_map, vision_conditions) where vision_conditions is the
+        subset of condition keys to use for crop generation / CLIP inference.
+        Falls back to all walk conditions if vision_conditions is absent.
+    """
+    _default_map = {
+        "walk_attend": "walk_attend",
+        "walk_unattend": "walk_unattend",
+        "sit_attend": "sit_attend",
+        "sit_unattend": "sit_unattend",
+    }
+    try:
+        with open(_RUN_CONFIG_PATH, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        full_map = cfg.get("et", {}).get("folder_map")
+        if not isinstance(full_map, dict) or not full_map:
+            full_map = _default_map
+        vis_conds = cfg.get("vision_conditions")
+        if not isinstance(vis_conds, list) or not vis_conds:
+            # Default: only walk conditions
+            vis_conds = [k for k in full_map if "walk" in k]
+        return full_map, vis_conds
+    except Exception:
+        return _default_map, ["walk_attend", "walk_unattend"]
+
+
+_FULL_ET_FOLDER_MAP, VISION_CONDITIONS = _load_vision_config()
+
+# Full map (all conditions) — used by EEG-side helpers like get_eye_dir
+ET_FOLDER_MAP = _FULL_ET_FOLDER_MAP
+
+# Filtered map — only conditions where vision crops should be generated
+VISION_ET_FOLDER_MAP = {k: v for k, v in ET_FOLDER_MAP.items() if k in VISION_CONDITIONS}
+
 CATEGORIES = {
     "sky": (
         "a wide angle fisheye view looking up at sky and clouds "
@@ -41,13 +86,6 @@ CATEGORY_COLORS = {
     "other": "#A9A9A9",
 }
 
-ET_FOLDER_MAP = {
-    "walk_attend": "Attend_Walk",
-    "walk_unattend": "Unattend_Walk",
-    "sit_attend": "Attend_Sit",
-    "sit_unattend": "Unattend_Sit",
-}
-
 # Map condition label → ordered list of candidate filename templates.
 # get_world_video_path() returns the first candidate that exists on disk.
 # More-specific names (walk_attend, sit_attend) are tried before generic ones
@@ -76,11 +114,17 @@ MIN_FIXATION_MS = 80
 CLIP_MODEL = "ViT-B/32"
 
 
-def get_eye_dir(r_dir, sj_num, condition_label):
+def get_eye_dir(data_root, sj_num, condition_label):
+    """Build path to a subject's Pupil Labs export folder for one condition.
+
+    Args:
+        data_root: Absolute directory that contains ``sjNN/`` subject folders
+            (i.e. the resolved ``data.root`` from ``run_config.yaml``).
+    """
     folder = ET_FOLDER_MAP.get(condition_label)
     if folder is None:
         raise KeyError(f"Unknown condition label for eye folder: {condition_label}")
-    return os.path.join(r_dir, "data", f"sj{sj_num:02d}", "eye", folder)
+    return os.path.join(data_root, f"sj{sj_num:02d}", "eye", folder)
 
 
 def get_world_video_path(sj_num, condition_label, world_video_dir):

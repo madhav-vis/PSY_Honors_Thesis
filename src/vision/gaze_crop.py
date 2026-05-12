@@ -35,10 +35,16 @@ def crop_gaze_region(frame_bgr, gaze_x_px, gaze_y_px, crop_size=224):
     crop = frame_bgr[y1:y2, x1:x2]
 
     if crop.shape[0] < crop_size or crop.shape[1] < crop_size:
+        # Pad only on the clipped side(s) so the gaze pixel stays at the
+        # center of the final crop. left_pad/top_pad reflect how many
+        # pixels were missing on the left/top of the requested window.
+        left_pad = max(0, half - cx)
+        top_pad = max(0, half - cy)
         padded = np.zeros((crop_size, crop_size, 3), dtype=np.uint8)
-        py = (crop_size - crop.shape[0]) // 2
-        px = (crop_size - crop.shape[1]) // 2
-        padded[py : py + crop.shape[0], px : px + crop.shape[1]] = crop
+        padded[
+            top_pad : top_pad + crop.shape[0],
+            left_pad : left_pad + crop.shape[1],
+        ] = crop
         crop = padded
 
     # BGR → RGB

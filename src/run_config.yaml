@@ -1,9 +1,9 @@
-run_name: "sj03_all_cond_test"
+run_name: "aLL_sj_test_run"
 date: "auto"
 data:
-  root: "data"
-  subjects: [3]
-  world_video_dir: "/Users/madhav/PSY197B_worldvideos"  # absolute path; override per machine
+  root: "C:/Users/twbul/OneDrive/Desktop/Subjects_Walking_Outdoors"
+  subjects: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
+  world_video_dir:  "C:/Users/twbul/OneDrive/Desktop/Subjects_Walking_Outdoors/worldvideos"
 
 eeg:
   reference_channels: ["TP9", "TP10"]
@@ -31,10 +31,14 @@ conditions:
 
 et:
   folder_map:
-    walk_attend: "Attend_Walk"
-    walk_unattend: "Unattend_Walk"
-    sit_attend: "Attend_Sit"
-    sit_unattend: "Unattend_Sit"
+    sit_attend: "sit_attend"
+    sit_unattend: "sit_unattend"
+    walk_attend: "walk_attend"
+    walk_unattend: "walk_unattend"
+
+vision_conditions:
+  - "walk_attend"
+  - "walk_unattend"
 
 erp:
   target_channels: ["Pz"]

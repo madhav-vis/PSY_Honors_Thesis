@@ -28,6 +28,7 @@ from vision.config import (
 )
 from vision.label_store import (
     crops_exist,
+    data_root_from_config,
     get_crop_dir,
     load_labels_for,
     mirror_crops_dir,
@@ -130,7 +131,7 @@ def generate_crops_for_condition(
             progress_cb("Crops", 1, 1, msg)
         return stable_dir, n_existing
 
-    eye_dir = get_eye_dir(_PROJECT_ROOT, sj_num, label)
+    eye_dir = get_eye_dir(data_root_from_config(), sj_num, label)
     video_path = get_world_video_path(sj_num, label, world_video_dir)
 
     fix_path = os.path.join(eye_dir, "fixations.csv")
@@ -231,7 +232,7 @@ def generate_crops_for_condition(
 def _process_condition(sj_num, condition, run_dir, classifier, world_video_dir=None):
     """Run all vision pipeline phases for one subject × condition."""
     label = condition
-    eye_dir = get_eye_dir(_PROJECT_ROOT, sj_num, label)
+    eye_dir = get_eye_dir(data_root_from_config(), sj_num, label)
     video_path = get_world_video_path(sj_num, label, world_video_dir)
     vision_dir = get_vision_out_dir(run_dir, sj_num, label)
 

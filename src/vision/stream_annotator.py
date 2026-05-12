@@ -31,6 +31,7 @@ from vision.label_store import (
     cohens_kappa_matrix,
     crop_status_grid,
     crops_exist,
+    data_root_from_config,
     get_crop_dir,
     get_crop_path,
     inter_rater_overlaps,
@@ -234,9 +235,11 @@ with t_gen:
         status_df = pd.DataFrame()
 
     if status_df.empty:
+        _scanned = data_root_from_config()
         st.info(
-            "No subject data directories found under `data/`. "
-            "Make sure your data is in `data/sj03/`, `data/sj04/`, etc."
+            f"No `sjNN` subject folders found under:\n\n`{_scanned}`\n\n"
+            "Check that `data.root` in `run_config.yaml` points to the folder "
+            "that directly contains `sj01/`, `sj02/`, … subdirectories."
         )
     else:
         def _status_icon(val):
