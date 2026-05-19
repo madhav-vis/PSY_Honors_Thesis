@@ -8,7 +8,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
+from collections import deque
 
 import numpy as np
 import pandas as pd
@@ -26,7 +28,26 @@ from pipeline_progress import read_progress, clear_progress
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "src", "run_config.yaml")
-VENV_PYTHON = os.path.join(PROJECT_ROOT, ".venv", "bin", "python3.11")
+
+
+def _find_venv_python() -> str:
+    """Locate the project venv interpreter across OSes.
+
+    Falls back to sys.executable so the dashboard still works when
+    launched from an already-activated venv or a non-standard layout.
+    """
+    candidates = [
+        os.path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe"),  # Windows
+        os.path.join(PROJECT_ROOT, ".venv", "bin", "python"),          # macOS/Linux
+        os.path.join(PROJECT_ROOT, ".venv", "bin", "python3.11"),      # legacy
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return sys.executable
+
+
+VENV_PYTHON = _find_venv_python()
 
 st.set_page_config(
     page_title="PSY197B Dashboard",
@@ -181,6 +202,175 @@ def _load_or_build_erp_cache(rn, sj, conds_tuple):
     except Exception:
         pass
     return cache
+
+
+# ── Cross-subject aggregation helpers ────────────────────────────
+
+
+@st.cache_data(ttl=600)
+def _load_or_build_all_erp_cache(rn, subjects_tuple, conds_tuple):
+    """Grand-average ERP traces across `subjects_tuple` for each grid cell.
+
+    Reads the per-subject `dashboard_cache_sj{NN}.json` caches (building them
+    on the fly if missing) and averages the per-cell `go`/`nogo` arrays. n
+    counts are summed across subjects. Times are taken from the first
+    subject that contributes to the cell (all subjects share the epoch
+    timeline because the pipeline enforces sfreq/tmin/tmax).
+    """
+    agg = {
+        "erp_by_cell": {},
+        "errors": [],
+        "missing": [],
+        "n_subjects_by_cell": {},
+    }
+    per_cell_acc = {}
+    for sj in subjects_tuple:
+        sub_cache = _load_or_build_erp_cache(rn, sj, conds_tuple)
+        for msg in sub_cache.get("errors", []):
+            agg["errors"].append(f"sj{sj:02d}: {msg}")
+        for cell, item in sub_cache.get("erp_by_cell", {}).items():
+            slot = per_cell_acc.setdefault(cell, {
+                "times_ms": item["times_ms"],
+                "go_stack": [],
+                "nogo_stack": [],
+                "n_go": 0,
+                "n_nogo": 0,
+                "n_subjects": 0,
+            })
+            if item.get("go") is not None:
+                slot["go_stack"].append(np.asarray(item["go"], dtype=float))
+                slot["n_go"] += int(item.get("n_go", 0))
+            if item.get("nogo") is not None:
+                slot["nogo_stack"].append(np.asarray(item["nogo"], dtype=float))
+                slot["n_nogo"] += int(item.get("n_nogo", 0))
+            slot["n_subjects"] += 1
+
+    for cell, slot in per_cell_acc.items():
+        go_mean = (
+            np.mean(np.vstack(slot["go_stack"]), axis=0).tolist()
+            if slot["go_stack"] else None
+        )
+        nogo_mean = (
+            np.mean(np.vstack(slot["nogo_stack"]), axis=0).tolist()
+            if slot["nogo_stack"] else None
+        )
+        agg["erp_by_cell"][cell] = {
+            "times_ms": slot["times_ms"],
+            "go": go_mean,
+            "nogo": nogo_mean,
+            "n_go": slot["n_go"],
+            "n_nogo": slot["n_nogo"],
+        }
+        agg["n_subjects_by_cell"][cell] = slot["n_subjects"]
+
+    # Track conditions where NO subject produced a feature epoch file
+    present_cells = set(agg["erp_by_cell"].keys())
+    expected_cells = {_condition_grid_label(c) for c in conds_tuple}
+    agg["missing"] = sorted(expected_cells - present_cells)
+    return agg
+
+
+@st.cache_data(ttl=120)
+def _aggregate_behavior(rn, subjects_tuple, conds_tuple):
+    """Pool per-subject *_features.csv rows and return rows for the
+    Sit/Walk behavior plot. Each row is one (subject, condition) pair
+    so the existing `_plot_sit_walk_behavior_matplotlib` can take
+    mean +/- SEM across subjects."""
+    rows = []
+    for sj in subjects_tuple:
+        for cond in conds_tuple:
+            _mv, _att = _parse_condition_parts(cond)
+            if _att != "attend":
+                continue
+            feat = load_csv(os.path.join(
+                data_dir(rn), f"sj{sj:02d}_{cond}_features.csv"
+            ))
+            row = _build_movement_behavior_rows(feat, cond)
+            if row is not None:
+                rows.append(row)
+    return rows
+
+
+@st.cache_data(ttl=120)
+def _aggregate_vision_results(rn, subjects_tuple, conds_tuple):
+    """Concat every per-subject `*_vision_results.csv` into one frame."""
+    frames = []
+    for sj in subjects_tuple:
+        for cond in conds_tuple:
+            vr_path = os.path.join(
+                vision_dir(rn, sj, cond),
+                f"sj{sj:02d}_{cond}_vision_results.csv",
+            )
+            df = load_csv(vr_path)
+            if df is not None and len(df) > 0:
+                d2 = df.copy()
+                d2["subject"] = sj
+                d2["condition"] = cond
+                frames.append(d2)
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
+
+
+@st.cache_data(ttl=120)
+def _aggregate_et_metrics(rn, subjects_tuple, conds_tuple):
+    """For each condition, mean +/- SD across subjects of total distance and mean rate.
+
+    Returns a DataFrame with columns: condition, n_subjects,
+    total_distance_mean, total_distance_sd, mean_rate_mean, mean_rate_sd.
+    Uses the same per-subject Euclidean computation as the single-subject
+    view via `et_viz.compute_euclidean`.
+    """
+    et_map = _et_folder_map()
+    data_root = _project_data_root()
+    rows = []
+    for cond in conds_tuple:
+        totals = []
+        rates = []
+        for sj in subjects_tuple:
+            csv_path = os.path.join(
+                data_root, f"sj{sj:02d}", "eye",
+                et_map.get(cond, ""), "gaze_positions.csv",
+            )
+            if not os.path.exists(csv_path):
+                continue
+            euc = et_viz.compute_euclidean(csv_path)
+            if euc is None:
+                continue
+            totals.append(float(euc["total_distance"]))
+            rates.append(float(euc["mean_rate"]))
+        if not totals:
+            continue
+        rows.append({
+            "condition": cond,
+            "n_subjects": len(totals),
+            "total_distance_mean": float(np.mean(totals)),
+            "total_distance_sd": float(np.std(totals, ddof=1)) if len(totals) > 1 else 0.0,
+            "mean_rate_mean": float(np.mean(rates)),
+            "mean_rate_sd": float(np.std(rates, ddof=1)) if len(rates) > 1 else 0.0,
+        })
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=120)
+def _aggregate_cluster_entropy(rn, subjects_tuple, conds_tuple):
+    """Concat cluster_entropy rows from every subject's `*_vision_trial_features.csv`."""
+    out = []
+    for sj in subjects_tuple:
+        for cond in conds_tuple:
+            vf = load_csv(os.path.join(
+                data_dir(rn),
+                f"sj{sj:02d}_{cond}_vision_trial_features.csv",
+            ))
+            if vf is None or "cluster_entropy" not in vf.columns:
+                continue
+            for v in vf["cluster_entropy"].dropna():
+                out.append({
+                    "Condition": cond,
+                    "Cluster Entropy": float(v),
+                    "Subject": sj,
+                })
+    return out
 
 
 @st.cache_data(ttl=120)
@@ -349,6 +539,18 @@ if not runs:
 else:
     selected_run = st.sidebar.selectbox("Run", runs)
 
+view_mode = st.sidebar.radio(
+    "View mode",
+    ["All subjects (average)", "Single subject"],
+    index=0,
+    help=(
+        "Aggregate panels use grand-averages and pooled distributions "
+        "across every subject with data in this run. Switch to "
+        "'Single subject' to drill into one subject's plots."
+    ),
+)
+aggregate_mode = view_mode.startswith("All")
+
 sj_num = None
 subjects = []
 conditions = []
@@ -383,9 +585,16 @@ if selected_run:
 st.title("PSY197B")
 st.caption("Mobile EEG + Eye Tracking")
 
-if selected_run and len(subjects) > 1:
+# Subject picker is hidden in aggregate mode; tabs render per-subject only
+# when the user explicitly switches to "Single subject".
+if selected_run and not aggregate_mode and len(subjects) > 1:
     sj_num = st.selectbox("Subject", subjects,
                            format_func=lambda x: f"sj{x:02d}")
+elif selected_run and aggregate_mode and subjects:
+    st.caption(
+        f"Aggregating across {len(subjects)} subject(s): "
+        + ", ".join(f"sj{s:02d}" for s in subjects)
+    )
 
 
 # ── Tabs ─────────────────────────────────────────────────────
@@ -457,10 +666,28 @@ with tab_run:
                 try:
                     process = subprocess.Popen(
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        text=True, cwd=PROJECT_ROOT,
+                        text=True, encoding="utf-8", errors="replace",
+                        bufsize=1,
+                        cwd=PROJECT_ROOT,
                     )
+
+                    # Drain stdout on a background thread. Windows pipe buffers
+                    # are ~4 KB; if we don't read, the child blocks on write
+                    # the instant the buffer fills, causing a silent deadlock.
+                    log_lines: deque = deque()
+                    log_lock = threading.Lock()
+
+                    def _drain():
+                        for line in iter(process.stdout.readline, ""):
+                            with log_lock:
+                                log_lines.append(line)
+                        process.stdout.close()
+
+                    drain_thread = threading.Thread(target=_drain, daemon=True)
+                    drain_thread.start()
+
                     start_time = time.time()
-                    log_lines = []
+                    last_log_render = 0.0
 
                     while process.poll() is None:
                         if time.time() - start_time > timeout_s:
@@ -475,12 +702,21 @@ with tab_run:
                                 progress_bar.progress(min(frac, 1.0))
                                 status_text.markdown(f"**{prog['step']}** — {prog['message']}")
 
+                        # Refresh the live log every couple of seconds so the
+                        # user can see progress without redraw thrash.
+                        now = time.time()
+                        if now - last_log_render > 2.0:
+                            with log_lock:
+                                tail = "".join(list(log_lines)[-200:])
+                            if tail:
+                                log_placeholder.code(tail, language="text")
+                            last_log_render = now
+
                         time.sleep(1.0)
 
-                    remaining, _ = process.communicate()
-                    if remaining:
-                        log_lines.append(remaining)
-                    full_log = "".join(log_lines)
+                    drain_thread.join(timeout=5.0)
+                    with log_lock:
+                        full_log = "".join(log_lines)
                     st.session_state.pipeline_log = full_log
 
                     if process.returncode == 0:
@@ -533,21 +769,33 @@ with tab_run:
 with tab_overview:
     if not selected_run:
         st.info("Select a run from the sidebar.")
-    elif not sj_num:
+    elif aggregate_mode and not subjects:
+        st.info("No subjects with preprocessed data in this run yet.")
+    elif not aggregate_mode and not sj_num:
         st.info("Select a subject.")
     else:
-        st.header(f"Overview — sj{sj_num:02d}")
+        if aggregate_mode:
+            st.header(f"Overview — All subjects (n={len(subjects)})")
+        else:
+            st.header(f"Overview — sj{sj_num:02d}")
 
         # ── 2×2 ERP Grid (Go vs NoGo, Attend/Unattend × Sit/Walk) ────
         st.subheader("Go vs NoGo ERPs — Pz")
 
-        erp_cache = _load_or_build_erp_cache(
-            selected_run, sj_num, tuple(conditions))
+        if aggregate_mode:
+            erp_cache = _load_or_build_all_erp_cache(
+                selected_run, tuple(subjects), tuple(conditions))
+            missing_feature_epo = [
+                (cell, "(no subject has data for this cell)")
+                for cell in erp_cache.get("missing", [])]
+        else:
+            erp_cache = _load_or_build_erp_cache(
+                selected_run, sj_num, tuple(conditions))
+            missing_feature_epo = [
+                (c, f"sj{sj_num:02d}_{c}_Features-epo.fif")
+                for c in erp_cache.get("missing", [])]
         erp_by_cell = erp_cache["erp_by_cell"]
         erp_load_errors = erp_cache.get("errors", [])
-        missing_feature_epo = [
-            (c, f"sj{sj_num:02d}_{c}_Features-epo.fif")
-            for c in erp_cache.get("missing", [])]
 
         cell_order = ["Attend Sit", "Unattend Sit", "Attend Walk", "Unattend Walk"]
 
@@ -606,22 +854,32 @@ with tab_overview:
 
         st.markdown("---")
         st.subheader("Behavior by Movement (Sit vs Walk)")
-        beh_rows = []
-        for _c in conditions:
-            _mv, _att = _parse_condition_parts(_c)
-            if _att != "attend":
-                continue
-            _feat = load_csv(
-                os.path.join(data_dir(selected_run), f"sj{sj_num:02d}_{_c}_features.csv")
-            )
-            _row = _build_movement_behavior_rows(_feat, _c)
-            if _row is not None:
-                beh_rows.append(_row)
+        if aggregate_mode:
+            beh_rows = _aggregate_behavior(
+                selected_run, tuple(subjects), tuple(conditions))
+        else:
+            beh_rows = []
+            for _c in conditions:
+                _mv, _att = _parse_condition_parts(_c)
+                if _att != "attend":
+                    continue
+                _feat = load_csv(
+                    os.path.join(data_dir(selected_run), f"sj{sj_num:02d}_{_c}_features.csv")
+                )
+                _row = _build_movement_behavior_rows(_feat, _c)
+                if _row is not None:
+                    beh_rows.append(_row)
         if beh_rows:
             _beh = pd.DataFrame(beh_rows)
             fig_beh = _plot_sit_walk_behavior_matplotlib(_beh)
             st.pyplot(fig_beh, clear_figure=True, width="stretch")
-            st.caption("Attend-only conditions: Hit/Commission Error rates over total trials.")
+            if aggregate_mode:
+                st.caption(
+                    f"Attend-only conditions, pooled across {len(subjects)} subjects. "
+                    "Error bars = SEM across subjects."
+                )
+            else:
+                st.caption("Attend-only conditions: Hit/Commission Error rates over total trials.")
         else:
             st.info("No Attend-condition movement behavior data found (`*_features.csv`).")
 
@@ -633,8 +891,72 @@ with tab_overview:
 # ════════════════════════════════════════════════════════════
 
 with tab_et:
-    if not selected_run or not sj_num:
-        st.info("Select a run and subject.")
+    if not selected_run:
+        st.info("Select a run from the sidebar.")
+    elif aggregate_mode:
+        if not subjects:
+            st.info("No subjects with data in this run yet.")
+        else:
+            st.header(f"Eye Tracking — All subjects (n={len(subjects)})")
+            st.caption(
+                "Aggregate mode shows cross-subject means; per-subject "
+                "scanpaths and the optical-axis / gyro / pupil triptych "
+                "are only available in Single subject view."
+            )
+
+            et_agg = _aggregate_et_metrics(
+                selected_run, tuple(subjects), tuple(conditions))
+
+            if et_agg is None or len(et_agg) == 0:
+                st.info(
+                    "No `gaze_positions.csv` files found for any subject "
+                    "under the configured data root."
+                )
+            else:
+                st.subheader("Total gaze distance (mean +/- SD across subjects)")
+                fig_total = px.bar(
+                    et_agg, x="condition", y="total_distance_mean",
+                    error_y="total_distance_sd",
+                    color="condition",
+                    labels={
+                        "condition": "Condition",
+                        "total_distance_mean": "Total Distance (px)",
+                    },
+                )
+                fig_total.update_layout(
+                    showlegend=False, height=380, template="plotly_white",
+                )
+                st.plotly_chart(fig_total, width="stretch")
+
+                st.subheader("Mean gaze rate (mean +/- SD across subjects)")
+                fig_rate = px.bar(
+                    et_agg, x="condition", y="mean_rate_mean",
+                    error_y="mean_rate_sd",
+                    color="condition",
+                    labels={
+                        "condition": "Condition",
+                        "mean_rate_mean": "Mean Rate (px/s)",
+                    },
+                )
+                fig_rate.update_layout(
+                    showlegend=False, height=380, template="plotly_white",
+                )
+                st.plotly_chart(fig_rate, width="stretch")
+
+                with st.expander("Per-subject contributions"):
+                    st.dataframe(
+                        et_agg.assign(
+                            **{
+                                "total_distance_mean": et_agg["total_distance_mean"].round(0),
+                                "total_distance_sd": et_agg["total_distance_sd"].round(0),
+                                "mean_rate_mean": et_agg["mean_rate_mean"].round(0),
+                                "mean_rate_sd": et_agg["mean_rate_sd"].round(0),
+                            }
+                        ),
+                        hide_index=True, width="stretch",
+                    )
+    elif not sj_num:
+        st.info("Select a subject.")
     else:
         st.header(f"Eye Tracking — sj{sj_num:02d}")
 
@@ -1020,8 +1342,99 @@ with tab_et:
 # ════════════════════════════════════════════════════════════
 
 with tab_vision:
-    if not selected_run or not sj_num:
-        st.info("Select a run and subject.")
+    if not selected_run:
+        st.info("Select a run from the sidebar.")
+    elif aggregate_mode:
+        if not subjects:
+            st.info("No subjects with data in this run yet.")
+        else:
+            st.header(f"Vision — All subjects (n={len(subjects)})")
+            st.caption(
+                "Aggregate mode pools every subject's `vision_results.csv`. "
+                "Per-subject UMAP / labeled-frame PNGs and crop thumbnails "
+                "are only available in Single subject view."
+            )
+
+            pooled = _aggregate_vision_results(
+                selected_run, tuple(subjects), tuple(conditions))
+
+            if pooled is None or len(pooled) == 0:
+                st.info(
+                    "No `vision_results.csv` found for any subject in this run. "
+                    "Run the vision pipeline first."
+                )
+            else:
+                _c1, _c2, _c3, _c4 = st.columns(4)
+                _c1.metric("Total Fixations", len(pooled))
+                _c2.metric("Subjects", pooled["subject"].nunique())
+                if "confidence" in pooled.columns:
+                    _c3.metric("Mean Confidence",
+                               f"{pooled['confidence'].mean():.3f}")
+                if "cluster_id" in pooled.columns:
+                    _c4.metric("N Clusters (pooled)",
+                               pooled["cluster_id"].nunique())
+
+                if "gaze_target_category" in pooled.columns:
+                    cat_counts = pooled["gaze_target_category"].value_counts()
+                    _cat_colors = {
+                        "sky": "#87CEEB", "ocean": "#1E90FF",
+                        "water": "#4169E1", "people": "#FF6B6B",
+                        "vegetation": "#2E8B57", "trail_ground": "#CD853F",
+                        "other": "#A9A9A9",
+                    }
+                    fig_cat = px.bar(
+                        x=cat_counts.index,
+                        y=cat_counts.values,
+                        labels={"x": "Category", "y": "Count"},
+                        color=cat_counts.index,
+                        color_discrete_map=_cat_colors,
+                    )
+                    fig_cat.update_layout(
+                        showlegend=False, height=380,
+                        title="Category Distribution (pooled across subjects)",
+                    )
+                    st.plotly_chart(fig_cat, use_container_width=True)
+
+                if "cluster_id" in pooled.columns:
+                    cluster_counts = pooled["cluster_id"].value_counts().sort_index()
+                    fig_cl = px.bar(
+                        x=cluster_counts.index.astype(str),
+                        y=cluster_counts.values,
+                        labels={"x": "Cluster ID", "y": "Count"},
+                        color=cluster_counts.index.astype(str),
+                    )
+                    fig_cl.update_layout(
+                        showlegend=False, height=320,
+                        title="Cluster Size Distribution (pooled)",
+                    )
+                    st.plotly_chart(fig_cl, width="stretch")
+
+                if "confidence" in pooled.columns:
+                    fig_conf = px.histogram(
+                        pooled, x="confidence", nbins=30,
+                        labels={"confidence": "CLIP Confidence"},
+                        color_discrete_sequence=["#3498db"],
+                    )
+                    fig_conf.add_vline(x=0.25, line_dash="dash",
+                                       line_color="red",
+                                       annotation_text="chance")
+                    fig_conf.add_vline(x=0.45, line_dash="dash",
+                                       line_color="green",
+                                       annotation_text="reliable")
+                    fig_conf.update_layout(height=320,
+                                           title="Confidence Distribution (pooled)")
+                    st.plotly_chart(fig_conf, width="stretch")
+
+                if "gaze_target_category" in pooled.columns:
+                    with st.expander("Category breakdown by subject"):
+                        per_sj = (
+                            pooled.groupby(["subject", "gaze_target_category"])
+                            .size()
+                            .unstack(fill_value=0)
+                        )
+                        st.dataframe(per_sj, width="stretch")
+    elif not sj_num:
+        st.info("Select a subject.")
     else:
         st.header(f"Vision — sj{sj_num:02d}")
 
@@ -1149,8 +1562,50 @@ with tab_vision:
 # ════════════════════════════════════════════════════════════
 
 with tab_fusion:
-    if not selected_run or not sj_num:
-        st.info("Select a run and subject.")
+    if not selected_run:
+        st.info("Select a run from the sidebar.")
+    elif aggregate_mode:
+        if not subjects:
+            st.info("No subjects with data in this run yet.")
+        else:
+            st.header(f"Fusion & DL — All subjects (n={len(subjects)})")
+            st.caption(
+                "Aggregate mode pools cluster entropy across all subjects. "
+                "Per-subject trial tables and DL tensor shapes are only "
+                "available in Single subject view."
+            )
+
+            ent_rows = _aggregate_cluster_entropy(
+                selected_run, tuple(subjects), tuple(conditions))
+            if not ent_rows:
+                st.info(
+                    "No `cluster_entropy` columns found in any subject's "
+                    "`*_vision_trial_features.csv`."
+                )
+            else:
+                ent_df = pd.DataFrame(ent_rows)
+                st.subheader("Cluster Entropy: Attend vs Unattend (pooled)")
+                fig_ent = px.box(
+                    ent_df, x="Condition", y="Cluster Entropy",
+                    color="Condition",
+                    points="outliers",
+                )
+                fig_ent.update_layout(height=380, showlegend=False)
+                st.plotly_chart(fig_ent, width="stretch")
+                st.caption(
+                    f"Pooled across {ent_df['Subject'].nunique()} subjects, "
+                    f"{len(ent_df)} trials with cluster_entropy."
+                )
+
+                with st.expander("Summary by condition"):
+                    summary = (
+                        ent_df.groupby("Condition")["Cluster Entropy"]
+                        .agg(["count", "mean", "std", "median"])
+                        .round(3)
+                    )
+                    st.dataframe(summary, width="stretch")
+    elif not sj_num:
+        st.info("Select a subject.")
     else:
         st.header(f"Fusion & DL — sj{sj_num:02d}")
 
@@ -1261,6 +1716,7 @@ with tab_nogo:
                 try:
                     result = subprocess.run(
                         cmd, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace",
                         timeout=600, cwd=PROJECT_ROOT,
                     )
                     if result.returncode == 0:

@@ -112,10 +112,21 @@ def preprocess_eeg(sj_num, cond):
               f"{len(trial_data)} trials remain")
 
     # ── Load and prepare continuous EEG ──────────────────────────────
+    # Some subjects (sj05+ in this dataset) use a reversed token order in the
+    # filename, e.g. "attend_sit" instead of "sit_attend". Try the canonical
+    # name first, then fall back to the swapped variant before giving up.
     eeg_file = os.path.join(source_dir_eeg, f"sj{sj_num:02d}_{label}.vhdr")
     if not os.path.exists(eeg_file):
-        print(f"    Error: EEG file not found: {eeg_file}")
-        return None, None
+        swapped_label = "_".join(reversed(label.split("_")))
+        alt_file = os.path.join(source_dir_eeg, f"sj{sj_num:02d}_{swapped_label}.vhdr")
+        if os.path.exists(alt_file):
+            print(f"    Note: using swapped filename convention "
+                  f"({label} -> {swapped_label})")
+            eeg_file = alt_file
+        else:
+            print(f"    Error: EEG file not found: {eeg_file}")
+            print(f"           (also tried: {alt_file})")
+            return None, None
 
     print(f"    Loading EEG from: {eeg_file}")
     raw = mne.io.read_raw_brainvision(eeg_file, preload=True)

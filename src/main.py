@@ -84,7 +84,7 @@ def save_log(tee_stdout, tee_stderr, run_dir):
     os.makedirs(run_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = os.path.join(run_dir, f"pipeline_log_{timestamp}.txt")
-    with open(log_path, "w") as f:
+    with open(log_path, "w", encoding="utf-8") as f:
         f.write(f"Pipeline run: {datetime.now().isoformat()}\n")
         f.write(f"{'='*60}\n\n")
         f.write(tee_stdout.getvalue())
@@ -114,6 +114,15 @@ def main():
         help=f"Steps to run: {', '.join(steps.keys())}, or 'all' (default: all)",
     )
     args = parser.parse_args()
+
+    # Force UTF-8 on the real streams before tee-ing. On Windows, the default
+    # codepage (cp1252) cannot encode characters like → or — that the pipeline
+    # prints, which crashes any subprocess that captures stdout.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
     # Tee stdout/stderr so output goes to terminal AND gets saved
     tee_stdout = TeeStream(sys.stdout)

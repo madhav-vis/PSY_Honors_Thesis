@@ -13,8 +13,8 @@ eeg:
   bad_channel_z_thresh: 3.5
   detect_bad_channels: true
   apply_ica: false
-  use_gedai: true
-  trigger_latency_offset: 60
+  use_gedai: false
+  trigger_latency_offset: 36
   tmin: -0.2
   tmax: 1.0
   baseline: [-0.2, 0]
