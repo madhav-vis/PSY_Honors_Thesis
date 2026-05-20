@@ -34,6 +34,9 @@ python src/vision/vision_main.py --run-dir runs/<run_name>
 # Dashboard
 streamlit run src/dashboard.py
 
+# Vision annotator + results
+streamlit run src/vision/stream_annotator.py
+
 # Install dependencies
 pip install -r requirements.txt
 pip install -r requirements_vision.txt  # adds CLIP, opencv, etc.
@@ -118,7 +121,11 @@ Controlled by `run_config.yaml` flags `use_gedai` and `apply_ica`:
 
 ### Dashboard (src/dashboard.py)
 
-Streamlit app with tabs: Run Manager (edit config + launch pipelines), Overview (ERPs, behavior), Eye Tracking (heatmaps, scanpaths, euclidean distance, optical axis/gyro/pupil triptych), Vision (CLIP results), Fusion & DL (tensors, entropy), EEGNet (no-go classification results + UMAP embeddings).
+Streamlit app with tabs: Run Manager (edit config + launch EEG/ET pipeline), Overview (ERPs, behavior), Eye Tracking (heatmaps, scanpaths, euclidean distance, optical axis/gyro/pupil triptych), EEGNet (no-go classification results + UMAP embeddings). Each tab has its own view mode toggle (aggregate vs single subject) and subject selector.
+
+### Vision Annotator (src/vision/stream_annotator.py)
+
+Streamlit app for gaze crop annotation, model training, and vision pipeline results. Tabs: Generate Crops, Label, Statistics, Train, Evaluate, Results (CLIP results, categories, clusters — moved from dashboard).
 
 ## Conventions
 

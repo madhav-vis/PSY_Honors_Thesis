@@ -1,20 +1,23 @@
-"""Streamlit-based gaze crop annotation + training tool.
+"""Streamlit-based gaze crop annotation, training, and results tool.
 
 Run:  streamlit run src/vision/stream_annotator.py
 
-Five tabs:
+Six tabs:
   1. Generate Crops  — crop status grid, data availability
   2. Label           — annotation interface with labeler ID + flag support
   3. Statistics      — per-class distributions, coverage, inter-rater agreement
   4. Train           — CLIP linear head + ResNet-50, live metrics, model versioning
   5. Evaluate        — test-set confusion matrices and model comparison
+  6. Results         — vision pipeline output visualizations (CLIP results, categories, clusters)
 """
 
+import glob
 import os
 import sys
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 import yaml
 
@@ -148,6 +151,91 @@ def _get_all_pairs_with_crops():
     return sorted((sj, cond, n) for (sj, cond), n in rows.items())
 
 
+# ── Results tab helpers ───────────────────────────────────────
+
+
+@st.cache_data(ttl=30)
+def _list_runs():
+    if not os.path.isdir(RUNS_ROOT):
+        return []
+    return sorted(
+        [d for d in os.listdir(RUNS_ROOT)
+         if os.path.isdir(os.path.join(RUNS_ROOT, d))],
+        reverse=True,
+    )
+
+
+@st.cache_data(ttl=60)
+def _find_subjects_conditions(run_name):
+    dd = os.path.join(RUNS_ROOT, run_name, "data")
+    if not os.path.isdir(dd):
+        return [], []
+    subjects = set()
+    conditions = set()
+    suffixes = [
+        "_fused_metadata.csv",
+        "_features.csv",
+        "_EEG_Prepro1-epo.fif",
+        "_ET_Prepro1.csv",
+    ]
+    for f in os.listdir(dd):
+        for sfx in suffixes:
+            if f.endswith(sfx):
+                parts = f.replace(sfx, "").split("_", 1)
+                try:
+                    sj = int(parts[0].replace("sj", ""))
+                    cond = parts[1]
+                    subjects.add(sj)
+                    conditions.add(cond)
+                except (ValueError, IndexError):
+                    pass
+                break
+    return sorted(subjects), sorted(conditions)
+
+
+def _vision_dir(run_name, sj, cond):
+    return os.path.join(RUNS_ROOT, run_name, "vision", f"sj{sj:02d}_{cond}")
+
+
+def _vision_plots_dir(run_name):
+    return os.path.join(RUNS_ROOT, run_name, "plots", "vision")
+
+
+@st.cache_data(ttl=60)
+def _load_csv(path):
+    if os.path.exists(path):
+        return pd.read_csv(path)
+    return None
+
+
+@st.cache_data(ttl=120)
+def _aggregate_vision_results(run_name, subjects_tuple, conds_tuple):
+    frames = []
+    for sj in subjects_tuple:
+        for cond in conds_tuple:
+            vr_path = os.path.join(
+                _vision_dir(run_name, sj, cond),
+                f"sj{sj:02d}_{cond}_vision_results.csv",
+            )
+            df = _load_csv(vr_path)
+            if df is not None and len(df) > 0:
+                d2 = df.copy()
+                d2["subject"] = sj
+                d2["condition"] = cond
+                frames.append(d2)
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
+
+
+_CAT_COLORS = {
+    "sky": "#87CEEB", "ocean": "#1E90FF",
+    "water": "#4169E1", "people": "#FF6B6B",
+    "vegetation": "#2E8B57", "trail_ground": "#CD853F",
+    "other": "#A9A9A9",
+}
+
+
 # ── Sidebar ───────────────────────────────────────────────────
 
 with st.sidebar:
@@ -187,8 +275,8 @@ with st.sidebar:
 
 # ── Main tabs ─────────────────────────────────────────────────
 
-t_gen, t_label, t_stats, t_train, t_eval = st.tabs([
-    "Generate Crops", "Label", "Statistics", "Train", "Evaluate"
+t_gen, t_label, t_stats, t_train, t_eval, t_results = st.tabs([
+    "Generate Crops", "Label", "Statistics", "Train", "Evaluate", "Results"
 ])
 
 
@@ -1114,3 +1202,226 @@ with t_eval:
 
                     except Exception as exc:
                         st.error(f"Could not load checkpoint: {exc}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# TAB 6 — Results (Vision Pipeline Output)
+# ═══════════════════════════════════════════════════════════════
+
+with t_results:
+    st.header("Vision Pipeline Results")
+
+    _res_runs = _list_runs()
+    if not _res_runs:
+        st.info("No runs found in `runs/`.")
+    else:
+        _res_run = st.selectbox("Run", _res_runs, key="results_run")
+        _res_subjects, _res_conditions = _find_subjects_conditions(_res_run)
+
+        if not _res_subjects:
+            st.info("No subjects with data in this run.")
+        else:
+            _res_view = st.radio(
+                "View mode",
+                ["All subjects (average)", "Single subject"],
+                index=0,
+                horizontal=True,
+                key="results_view_mode",
+            )
+            _res_aggregate = _res_view.startswith("All")
+
+            if _res_aggregate:
+                st.subheader(f"Aggregate — {len(_res_subjects)} subject(s)")
+
+                pooled = _aggregate_vision_results(
+                    _res_run, tuple(_res_subjects), tuple(_res_conditions))
+
+                if pooled is None or len(pooled) == 0:
+                    st.info(
+                        "No `vision_results.csv` found for any subject. "
+                        "Run the vision pipeline first."
+                    )
+                else:
+                    _c1, _c2, _c3, _c4 = st.columns(4)
+                    _c1.metric("Total Fixations", len(pooled))
+                    _c2.metric("Subjects", pooled["subject"].nunique())
+                    if "confidence" in pooled.columns:
+                        _c3.metric("Mean Confidence",
+                                   f"{pooled['confidence'].mean():.3f}")
+                    if "cluster_id" in pooled.columns:
+                        _c4.metric("N Clusters (pooled)",
+                                   pooled["cluster_id"].nunique())
+
+                    if "gaze_target_category" in pooled.columns:
+                        cat_counts = pooled["gaze_target_category"].value_counts()
+                        fig_cat = px.bar(
+                            x=cat_counts.index,
+                            y=cat_counts.values,
+                            labels={"x": "Category", "y": "Count"},
+                            color=cat_counts.index,
+                            color_discrete_map=_CAT_COLORS,
+                        )
+                        fig_cat.update_layout(
+                            showlegend=False, height=380,
+                            title="Category Distribution (pooled across subjects)",
+                        )
+                        st.plotly_chart(fig_cat, use_container_width=True)
+
+                    if "cluster_id" in pooled.columns:
+                        cluster_counts = pooled["cluster_id"].value_counts().sort_index()
+                        fig_cl = px.bar(
+                            x=cluster_counts.index.astype(str),
+                            y=cluster_counts.values,
+                            labels={"x": "Cluster ID", "y": "Count"},
+                            color=cluster_counts.index.astype(str),
+                        )
+                        fig_cl.update_layout(
+                            showlegend=False, height=320,
+                            title="Cluster Size Distribution (pooled)",
+                        )
+                        st.plotly_chart(fig_cl, use_container_width=True)
+
+                    if "confidence" in pooled.columns:
+                        fig_conf = px.histogram(
+                            pooled, x="confidence", nbins=30,
+                            labels={"confidence": "CLIP Confidence"},
+                            color_discrete_sequence=["#3498db"],
+                        )
+                        fig_conf.add_vline(x=0.25, line_dash="dash",
+                                           line_color="red",
+                                           annotation_text="chance")
+                        fig_conf.add_vline(x=0.45, line_dash="dash",
+                                           line_color="green",
+                                           annotation_text="reliable")
+                        fig_conf.update_layout(height=320,
+                                               title="Confidence Distribution (pooled)")
+                        st.plotly_chart(fig_conf, use_container_width=True)
+
+                    if "gaze_target_category" in pooled.columns:
+                        with st.expander("Category breakdown by subject"):
+                            per_sj = (
+                                pooled.groupby(["subject", "gaze_target_category"])
+                                .size()
+                                .unstack(fill_value=0)
+                            )
+                            st.dataframe(per_sj, use_container_width=True)
+
+            else:
+                _res_sj = st.selectbox(
+                    "Subject", _res_subjects,
+                    format_func=lambda x: f"sj{x:02d}",
+                    key="results_subject",
+                )
+                st.subheader(f"Vision — sj{_res_sj:02d}")
+
+                vp_dir = _vision_plots_dir(_res_run)
+
+                for _v_cond in _res_conditions:
+                    st.markdown("---")
+                    st.subheader(f"{_v_cond}")
+
+                    _v_prefix = f"sj{_res_sj:02d}_{_v_cond}"
+
+                    v5_img = os.path.join(vp_dir, f"{_v_prefix}_V5_embedding_clusters.png")
+                    if os.path.exists(v5_img):
+                        st.image(v5_img, use_container_width=True,
+                                 caption="CLIP Embedding Clusters (UMAP)")
+
+                    v4_img = os.path.join(vp_dir, f"{_v_prefix}_V4_optimal_k.png")
+                    if os.path.exists(v4_img):
+                        st.image(v4_img, use_container_width=True,
+                                 caption="Optimal K Analysis")
+
+                    v6_img = os.path.join(vp_dir, f"{_v_prefix}_V6_cluster_timeline.png")
+                    if os.path.exists(v6_img):
+                        st.image(v6_img, use_container_width=True,
+                                 caption="Cluster Timeline")
+
+                    v1_img = os.path.join(vp_dir, f"{_v_prefix}_V1_labeled_frames.png")
+                    if os.path.exists(v1_img):
+                        st.image(v1_img, use_container_width=True,
+                                 caption="Labeled Frame Grid")
+
+                    v2_img = os.path.join(vp_dir, f"{_v_prefix}_V2_category_timeline.png")
+                    if os.path.exists(v2_img):
+                        st.image(v2_img, use_container_width=True,
+                                 caption="Category Timeline")
+
+                    v3_img = os.path.join(vp_dir, f"{_v_prefix}_V3_clip_vs_human.png")
+                    if os.path.exists(v3_img):
+                        st.image(v3_img, use_container_width=True,
+                                 caption="CLIP vs Human Labels (Accuracy)")
+
+                    vr_path = os.path.join(
+                        _vision_dir(_res_run, _res_sj, _v_cond),
+                        f"sj{_res_sj:02d}_{_v_cond}_vision_results.csv",
+                    )
+                    vision_results = _load_csv(vr_path)
+                    if vision_results is not None:
+                        _c1, _c2, _c3 = st.columns(3)
+                        _c1.metric("Total Fixations", len(vision_results))
+                        if "confidence" in vision_results.columns:
+                            _c2.metric("Mean Confidence",
+                                       f"{vision_results['confidence'].mean():.3f}")
+                        if "cluster_id" in vision_results.columns:
+                            _c3.metric("N Clusters",
+                                       vision_results["cluster_id"].nunique())
+
+                        if "gaze_target_category" in vision_results.columns:
+                            cat_counts = vision_results["gaze_target_category"].value_counts()
+                            fig_cat = px.bar(
+                                x=cat_counts.index,
+                                y=cat_counts.values,
+                                labels={"x": "Category", "y": "Count"},
+                                color=cat_counts.index,
+                                color_discrete_map=_CAT_COLORS,
+                            )
+                            fig_cat.update_layout(showlegend=False, height=350,
+                                                  title="Category Distribution")
+                            st.plotly_chart(fig_cat, use_container_width=True)
+
+                        if "cluster_id" in vision_results.columns:
+                            cluster_counts = vision_results["cluster_id"].value_counts().sort_index()
+                            fig_cl = px.bar(
+                                x=cluster_counts.index.astype(str),
+                                y=cluster_counts.values,
+                                labels={"x": "Cluster ID", "y": "Count"},
+                                color=cluster_counts.index.astype(str),
+                            )
+                            fig_cl.update_layout(showlegend=False, height=300,
+                                                 title="Cluster Size Distribution")
+                            st.plotly_chart(fig_cl, use_container_width=True)
+
+                        if "confidence" in vision_results.columns:
+                            fig_conf = px.histogram(
+                                vision_results, x="confidence", nbins=30,
+                                labels={"confidence": "CLIP Confidence"},
+                                color_discrete_sequence=["#3498db"],
+                            )
+                            fig_conf.add_vline(x=0.25, line_dash="dash",
+                                               line_color="red",
+                                               annotation_text="chance")
+                            fig_conf.add_vline(x=0.45, line_dash="dash",
+                                               line_color="green",
+                                               annotation_text="reliable")
+                            fig_conf.update_layout(height=300,
+                                                   title="Confidence Distribution")
+                            st.plotly_chart(fig_conf, use_container_width=True)
+
+                        with st.expander("Full Fixation Table"):
+                            st.dataframe(vision_results, use_container_width=True,
+                                         height=400)
+
+                    crops_d = os.path.join(
+                        _vision_dir(_res_run, _res_sj, _v_cond), "crops"
+                    )
+                    if os.path.isdir(crops_d):
+                        crop_files = sorted(glob.glob(os.path.join(crops_d, "*.png")))
+                        if crop_files:
+                            n_show = min(12, len(crop_files))
+                            sample = crop_files[::max(1, len(crop_files) // n_show)][:n_show]
+                            cols = st.columns(4)
+                            for i, cf in enumerate(sample):
+                                with cols[i % 4]:
+                                    st.image(cf, caption=os.path.basename(cf),
+                                             use_container_width=True)
