@@ -59,23 +59,23 @@ def remove_trials_matlab_style(df, indices_1based):
     return df
 
 
-def load_correct_montage_for_early_subjects(raw, sj_num):
-    """Remap channel names/positions for sj01–04 using a reference cap file."""
-    if sj_num > 4:
-        return raw
-    ref_path = os.path.join(
-        DATA_DIR, "Dependencies",
-        "EEG_32ch_Cap_Correct_Montage", "Test_32ch.vhdr",
-    )
+def load_correct_montage(raw):
+    """Remap channel names/positions for all subjects using a reference cap file.
+
+    Keeps only the first 32 EEG channels; drops accelerometer/auxiliary channels.
+    """
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ref_path = os.path.join(repo_root, "assets", "reference_montage", "Test_32ch.vhdr")
     if not os.path.exists(ref_path):
         print(f"    Warning: reference montage not found ({ref_path}) — skipping")
         return raw
     ref = mne.io.read_raw_brainvision(ref_path, preload=False, verbose=False)
-    rename_map = dict(zip(raw.ch_names, ref.ch_names))
+    rename_map = dict(zip(raw.ch_names[:32], ref.ch_names[:32]))
     raw.rename_channels(rename_map)
+    raw.pick(raw.ch_names[:32])
     if ref.get_montage() is not None:
         raw.set_montage(ref.get_montage(), on_missing="warn")
-    print(f"    Montage corrected for sj{sj_num:02d} using {ref_path}")
+    print(f"    Montage corrected ({len(raw.ch_names)} channels kept)")
     return raw
 
 
@@ -131,8 +131,7 @@ def preprocess_eeg(sj_num, cond):
     print(f"    Loading EEG from: {eeg_file}")
     raw = mne.io.read_raw_brainvision(eeg_file, preload=True)
 
-    # FIX 1 — montage correction for early subjects
-    raw = load_correct_montage_for_early_subjects(raw, sj_num)
+    raw = load_correct_montage(raw)
 
     if raw.info["sfreq"] != SFREQ_TARGET:
         print(f"    Downsampling from {raw.info['sfreq']:.1f} Hz to {SFREQ_TARGET} Hz")
@@ -143,20 +142,6 @@ def preprocess_eeg(sj_num, cond):
         raw.set_eeg_reference(REF_CHANNELS, ch_type="eeg")
     else:
         print("    Warning: reference channels not found, skipping re-reference")
-
-    ch_to_remove = [
-        ch
-        for ch in raw.ch_names
-        if any(
-            x in ch.lower()
-            for x in ["x_dir", "y_dir", "z_dir", "r_x", "r_y", "r_z",
-                       "l_x", "l_y", "l_z"]
-        )
-        or ch == "32"
-    ]
-    if ch_to_remove:
-        print(f"    Removing channels: {ch_to_remove}")
-        raw.drop_channels(ch_to_remove)
 
     print(f"    Filtering: {FILTER_LOW}–{FILTER_HIGH} Hz")
     raw.filter(FILTER_LOW, FILTER_HIGH, fir_design="firwin2")
