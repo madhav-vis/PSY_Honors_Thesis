@@ -1062,6 +1062,114 @@ with tab_overview:
                 else:
                     st.info("No data available for this component.")
 
+        # ── MNE Topographic Maps (250–700 ms) ──────────────────
+        st.markdown("---")
+        st.subheader("Scalp Topography (250–700 ms mean)")
+        st.caption(
+            "Mean ERP amplitude averaged over 250–700 ms, plotted per channel. "
+            "Go and NoGo shown side-by-side for each condition."
+        )
+
+        _topo_tmin, _topo_tmax = 0.25, 0.70
+
+        _topo_cols = st.columns(2)
+        _topo_idx = 0
+        _topo_conditions_to_show = conditions
+
+        for _t_cond in _topo_conditions_to_show:
+            _topo_epochs_loaded = []
+            _topo_trial_types = []
+
+            if aggregate_mode:
+                for _sj in subjects:
+                    _t_path = os.path.join(
+                        data_dir(selected_run),
+                        f"sj{_sj:02d}_{_t_cond}_EEG_Prepro1-epo.fif")
+                    if not os.path.exists(_t_path):
+                        continue
+                    try:
+                        _t_epo = mne.read_epochs(_t_path, preload=True, verbose=False)
+                        _t_epo.pick_types(eeg=True)
+                        _topo_epochs_loaded.append(_t_epo)
+                    except Exception:
+                        continue
+            else:
+                _t_path = os.path.join(
+                    data_dir(selected_run),
+                    f"sj{sj_num:02d}_{_t_cond}_EEG_Prepro1-epo.fif")
+                if os.path.exists(_t_path):
+                    try:
+                        _t_epo = mne.read_epochs(_t_path, preload=True, verbose=False)
+                        _t_epo.pick_types(eeg=True)
+                        _topo_epochs_loaded.append(_t_epo)
+                    except Exception:
+                        pass
+
+            if not _topo_epochs_loaded:
+                continue
+
+            _all_go_topo = []
+            _all_nogo_topo = []
+            _topo_info = _topo_epochs_loaded[0].info
+
+            for _t_epo in _topo_epochs_loaded:
+                _t_data = _t_epo.get_data() * 1e6
+                _t_times = _t_epo.times
+                _t_mask = (_t_times >= _topo_tmin) & (_t_times <= _topo_tmax)
+
+                if _t_epo.metadata is not None and "trialType" in _t_epo.metadata.columns:
+                    _tt = pd.to_numeric(
+                        _t_epo.metadata["trialType"], errors="coerce"
+                    ).to_numpy(dtype=float)
+                else:
+                    _tt = _t_epo.events[:, 2].astype(float)
+
+                _t_go = np.flatnonzero(_tt == 10.0)
+                _t_nogo = np.flatnonzero(_tt == 20.0)
+
+                if len(_t_go):
+                    _all_go_topo.append(
+                        _t_data[_t_go][:, :, _t_mask].mean(axis=(0, 2)))
+                if len(_t_nogo):
+                    _all_nogo_topo.append(
+                        _t_data[_t_nogo][:, :, _t_mask].mean(axis=(0, 2)))
+
+            _cond_label = _condition_grid_label(_t_cond)
+            _fig_topo, _ax_topo = plt.subplots(1, 2, figsize=(7, 3.5))
+
+            if _all_go_topo:
+                _go_avg = np.mean(np.vstack([t[np.newaxis, :] for t in _all_go_topo]), axis=0)
+                mne.viz.plot_topomap(
+                    _go_avg, _topo_info, axes=_ax_topo[0], show=False,
+                    cmap="RdBu_r", vlim=(-8, 8))
+                _n_go = sum(1 for _ in _all_go_topo)
+                _ax_topo[0].set_title(f"Go", fontsize=12)
+            else:
+                _ax_topo[0].text(0.5, 0.5, "No Go trials",
+                                 ha="center", va="center")
+                _ax_topo[0].set_axis_off()
+
+            if _all_nogo_topo:
+                _nogo_avg = np.mean(np.vstack([t[np.newaxis, :] for t in _all_nogo_topo]), axis=0)
+                mne.viz.plot_topomap(
+                    _nogo_avg, _topo_info, axes=_ax_topo[1], show=False,
+                    cmap="RdBu_r", vlim=(-8, 8))
+                _ax_topo[1].set_title(f"NoGo", fontsize=12)
+            else:
+                _ax_topo[1].text(0.5, 0.5, "No NoGo trials",
+                                 ha="center", va="center")
+                _ax_topo[1].set_axis_off()
+
+            _fig_topo.suptitle(_cond_label, fontsize=14)
+            _fig_topo.tight_layout()
+            with _topo_cols[_topo_idx % 2]:
+                st.pyplot(_fig_topo, clear_figure=True)
+            _topo_idx += 1
+            plt.close(_fig_topo)
+
+        if _topo_idx == 0:
+            st.info("No EEG epoch files found for topomap rendering.")
+
         st.markdown("---")
         st.subheader("Behavior by Movement (Sit vs Walk)")
         if aggregate_mode:
