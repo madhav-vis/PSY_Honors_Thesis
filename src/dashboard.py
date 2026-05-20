@@ -726,6 +726,10 @@ with tab_overview:
         erp_load_errors = erp_cache.get("errors", [])
 
         cell_order = ["Attend Sit", "Unattend Sit", "Attend Walk", "Unattend Walk"]
+        pos = {
+            "Attend Sit": (1, 1), "Unattend Sit": (1, 2),
+            "Attend Walk": (2, 1), "Unattend Walk": (2, 2),
+        }
 
         if missing_feature_epo or erp_load_errors:
             with st.expander("ERP data issues", expanded=True):
@@ -741,10 +745,6 @@ with tab_overview:
                 shared_xaxes=True, shared_yaxes=True,
                 vertical_spacing=0.14, horizontal_spacing=0.10,
             )
-            pos = {
-                "Attend Sit": (1, 1), "Unattend Sit": (1, 2),
-                "Attend Walk": (2, 1), "Unattend Walk": (2, 2),
-            }
             for cell, (r, c) in pos.items():
                 item = erp_by_cell.get(cell)
                 if not item:
@@ -1030,6 +1030,33 @@ with tab_overview:
 
             if not _topo_epochs_loaded:
                 continue
+
+            # Subjects preprocessed under different montage code can have
+            # slightly different channel sets (e.g. 31 vs 32 channels when Fz
+            # is missing). Intersect to the common channels in a stable order
+            # so np.vstack never sees a shape mismatch.
+            _common_chs = set(_topo_epochs_loaded[0].ch_names)
+            for _t_epo in _topo_epochs_loaded[1:]:
+                _common_chs &= set(_t_epo.ch_names)
+            _common_order = [
+                c for c in _topo_epochs_loaded[0].ch_names if c in _common_chs
+            ]
+            if not _common_order:
+                continue
+            _dropped = sorted(
+                {c for _t_epo in _topo_epochs_loaded for c in _t_epo.ch_names}
+                - _common_chs
+            )
+            if _dropped:
+                st.caption(
+                    f"Topomap channel intersection across subjects dropped: "
+                    f"{', '.join(_dropped)} (subjects preprocessed with "
+                    f"different montages)."
+                )
+            _topo_epochs_loaded = [
+                _t_epo.copy().pick(_common_order)
+                for _t_epo in _topo_epochs_loaded
+            ]
 
             _all_go_topo = []
             _all_nogo_topo = []

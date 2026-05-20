@@ -82,8 +82,10 @@ def extract_features(sj_num, cond):
     print(f"    P300 cluster: using {available_p300} ({len(available_p300)} channels)")
     p300_cluster = _mean_amplitude(epochs, available_p300, P300_WINDOW)
 
-    # N200 — frontocentral cluster (negative values = expected N200)
-    N200_CHANNELS = ["FCz", "Fz", "FC1", "FC2"]
+    # N200 — frontocentral cluster (negative values = expected N200).
+    # FCz is the ground/reference on the 32-ch BrainVision cap, so we surrogate
+    # it with the surrounding frontocentral midline channels.
+    N200_CHANNELS = ["Fz", "FC1", "FC2"]
     N200_TMIN, N200_TMAX = 0.180, 0.260
     available_n200 = [c for c in N200_CHANNELS if c in epochs.ch_names]
     if len(available_n200) < 3:
