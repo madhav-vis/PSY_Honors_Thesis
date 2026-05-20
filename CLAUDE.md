@@ -111,7 +111,7 @@ Controlled by `run_config.yaml` flags `use_gedai` and `apply_ica`:
 
 ### EEG Preprocessing Quirks
 
-- Subjects 1–4 have a known montage mismatch; `load_correct_montage_for_early_subjects()` remaps channel names/positions from a reference cap file at `data/Dependencies/EEG_32ch_Cap_Correct_Montage/`.
+- All subjects have a montage correction applied by `load_correct_montage()`, which remaps channel names/positions from a reference cap file at `assets/reference_montage/` and keeps only the first 32 EEG channels (dropping accelerometer/auxiliary channels). sj20 has fewer auxiliary channels (missing leg accelerometers) but is handled uniformly.
 - Hard-coded trial drops in `_MANUAL_TRIAL_DROPS_1BASED` maintain MATLAB parity for early subjects. sj03 drops are currently disabled due to sync issues.
 - Trigger latency offset (default 60 samples) is applied to event codes ≤ 200 to correct stimulus timing.
 - Trial alignment uses `align_to_eeg_events()` which handles BEH > EEG trial count mismatches via greedy matching.
