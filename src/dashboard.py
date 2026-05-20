@@ -159,9 +159,12 @@ def _load_or_build_erp_cache(rn, sj, conds_tuple):
     cache_path = os.path.join(data_dir(rn), f"dashboard_cache_sj{sj:02d}.json")
     if os.path.exists(cache_path):
         with open(cache_path) as f:
-            return json.load(f)
+            cached = json.load(f)
+        if cached.get("version") == 2:
+            return cached
+        os.remove(cache_path)
 
-    cache = {"erp_by_cell": {}, "errors": [], "missing": []}
+    cache = {"version": 2, "erp_by_cell": {}, "errors": [], "missing": []}
     for cond in conds_tuple:
         epo_path = os.path.join(data_dir(rn), f"sj{sj:02d}_{cond}_Features-epo.fif")
         if not os.path.exists(epo_path):
@@ -186,10 +189,14 @@ def _load_or_build_erp_cache(rn, sj, conds_tuple):
                 cache["errors"].append(f"{cond}: no Go/NoGo trials")
                 continue
             cell = _condition_grid_label(cond)
+            go_traces = data_ep[go_idx, ch_i, :] * 1e6 if len(go_idx) else None
+            nogo_traces = data_ep[nogo_idx, ch_i, :] * 1e6 if len(nogo_idx) else None
             cache["erp_by_cell"][cell] = {
                 "times_ms": (ep["times"] * 1000.0).tolist(),
-                "go": (data_ep[go_idx, ch_i, :].mean(0) * 1e6).tolist() if len(go_idx) else None,
-                "nogo": (data_ep[nogo_idx, ch_i, :].mean(0) * 1e6).tolist() if len(nogo_idx) else None,
+                "go": go_traces.mean(0).tolist() if go_traces is not None else None,
+                "go_sem": (go_traces.std(0) / np.sqrt(len(go_idx))).tolist() if go_traces is not None else None,
+                "nogo": nogo_traces.mean(0).tolist() if nogo_traces is not None else None,
+                "nogo_sem": (nogo_traces.std(0) / np.sqrt(len(nogo_idx))).tolist() if nogo_traces is not None else None,
                 "n_go": int(len(go_idx)),
                 "n_nogo": int(len(nogo_idx)),
             }
@@ -246,18 +253,16 @@ def _load_or_build_all_erp_cache(rn, subjects_tuple, conds_tuple):
             slot["n_subjects"] += 1
 
     for cell, slot in per_cell_acc.items():
-        go_mean = (
-            np.mean(np.vstack(slot["go_stack"]), axis=0).tolist()
-            if slot["go_stack"] else None
-        )
-        nogo_mean = (
-            np.mean(np.vstack(slot["nogo_stack"]), axis=0).tolist()
-            if slot["nogo_stack"] else None
-        )
+        go_arr = np.vstack(slot["go_stack"]) if slot["go_stack"] else None
+        nogo_arr = np.vstack(slot["nogo_stack"]) if slot["nogo_stack"] else None
+        n_go_sj = len(slot["go_stack"])
+        n_nogo_sj = len(slot["nogo_stack"])
         agg["erp_by_cell"][cell] = {
             "times_ms": slot["times_ms"],
-            "go": go_mean,
-            "nogo": nogo_mean,
+            "go": go_arr.mean(0).tolist() if go_arr is not None else None,
+            "go_sem": (go_arr.std(0) / np.sqrt(n_go_sj)).tolist() if go_arr is not None and n_go_sj > 1 else None,
+            "nogo": nogo_arr.mean(0).tolist() if nogo_arr is not None else None,
+            "nogo_sem": (nogo_arr.std(0) / np.sqrt(n_nogo_sj)).tolist() if nogo_arr is not None and n_nogo_sj > 1 else None,
             "n_go": slot["n_go"],
             "n_nogo": slot["n_nogo"],
         }
@@ -821,23 +826,42 @@ with tab_overview:
                 item = erp_by_cell.get(cell)
                 if not item:
                     continue
+                t = item["times_ms"]
                 if item["nogo"] is not None:
+                    nogo_y = np.asarray(item["nogo"])
                     fig_grid.add_trace(go.Scatter(
-                        x=item["times_ms"], y=item["nogo"],
+                        x=t, y=nogo_y.tolist(),
                         mode="lines", name=f"NoGo (n={item['n_nogo']})",
                         line=dict(color="#e74c3c", width=2),
                         showlegend=(cell == "Attend Sit"),
                     ), row=r, col=c)
+                    if item.get("nogo_sem") is not None:
+                        sem = np.asarray(item["nogo_sem"])
+                        fig_grid.add_trace(go.Scatter(
+                            x=t + t[::-1],
+                            y=(nogo_y + sem).tolist() + (nogo_y - sem)[::-1].tolist(),
+                            fill="toself", fillcolor="rgba(231,76,60,0.12)",
+                            line=dict(width=0), showlegend=False, hoverinfo="skip",
+                        ), row=r, col=c)
                 if item["go"] is not None:
+                    go_y = np.asarray(item["go"])
                     fig_grid.add_trace(go.Scatter(
-                        x=item["times_ms"], y=item["go"],
+                        x=t, y=go_y.tolist(),
                         mode="lines", name=f"Go (n={item['n_go']})",
                         line=dict(color="#2980b9", width=2),
                         showlegend=(cell == "Attend Sit"),
                     ), row=r, col=c)
+                    if item.get("go_sem") is not None:
+                        sem = np.asarray(item["go_sem"])
+                        fig_grid.add_trace(go.Scatter(
+                            x=t + t[::-1],
+                            y=(go_y + sem).tolist() + (go_y - sem)[::-1].tolist(),
+                            fill="toself", fillcolor="rgba(41,128,185,0.12)",
+                            line=dict(width=0), showlegend=False, hoverinfo="skip",
+                        ), row=r, col=c)
                 fig_grid.add_vline(x=0, line_color="gray", line_dash="dot",
                                    row=r, col=c)
-                fig_grid.add_vrect(x0=250, x1=500, fillcolor="rgba(255,200,0,0.08)",
+                fig_grid.add_vrect(x0=250, x1=700, fillcolor="rgba(255,200,0,0.08)",
                                    line_width=0, row=r, col=c)
             fig_grid.update_xaxes(title_text="Time (ms)", row=2, col=1)
             fig_grid.update_xaxes(title_text="Time (ms)", row=2, col=2)
@@ -848,9 +872,195 @@ with tab_overview:
                 legend=dict(orientation="h", y=-0.08),
             )
             st.plotly_chart(fig_grid, use_container_width=True)
-            st.caption("Shaded band = P300 window (250–500 ms). Dashed line = stimulus onset.")
+            st.caption("Shaded band = P300 window (250–700 ms). Shaded ribbons = ± SEM. Dashed line = stimulus onset.")
         else:
             st.info("No ERP data found. Run the full pipeline first (EEG preprocess → fusion → extract_features).")
+
+        # ── Per-component ERP grids (N1, P2, P300) ──────────────
+        try:
+            with open(CONFIG_PATH, "r") as _f:
+                _yaml_cfg = yaml.safe_load(_f)
+            _erp_components = _yaml_cfg.get("erp", {}).get("components", {})
+        except Exception:
+            _erp_components = {}
+
+        for _comp_name, _comp_cfg in _erp_components.items():
+            _comp_channels = _comp_cfg.get("channels", [])
+            _comp_window = _comp_cfg.get("window", [0, 1])
+            _win_ms = (_comp_window[0] * 1000, _comp_window[1] * 1000)
+
+            with st.expander(
+                f"{_comp_name.upper()} ERP — {', '.join(_comp_channels)} "
+                f"({_win_ms[0]:.0f}–{_win_ms[1]:.0f} ms)",
+                expanded=False,
+            ):
+                _comp_fig = make_subplots(
+                    rows=2, cols=2, subplot_titles=cell_order,
+                    shared_xaxes=True, shared_yaxes=True,
+                    vertical_spacing=0.14, horizontal_spacing=0.10,
+                )
+                _has_data = False
+                for _cc_cell, (_cc_r, _cc_c) in pos.items():
+                    for cond in conditions:
+                        if _condition_grid_label(cond) != _cc_cell:
+                            continue
+                        epo_path = os.path.join(
+                            data_dir(selected_run),
+                            f"sj{sj_num:02d}_{cond}_Features-epo.fif"
+                            if not aggregate_mode else "")
+                        if aggregate_mode:
+                            _comp_go_stack, _comp_nogo_stack = [], []
+                            for _sj in subjects:
+                                _ep_path = os.path.join(
+                                    data_dir(selected_run),
+                                    f"sj{_sj:02d}_{cond}_Features-epo.fif")
+                                if not os.path.exists(_ep_path):
+                                    continue
+                                try:
+                                    _ep = _load_epochs_cached(_ep_path)
+                                except Exception:
+                                    continue
+                                _ch_picks = [c for c in _comp_channels
+                                             if c in _ep["ch_names"]]
+                                if not _ch_picks:
+                                    continue
+                                _ch_idxs = [_ep["ch_names"].index(c) for c in _ch_picks]
+                                _d = _ep["data"][:, _ch_idxs, :].mean(axis=1) * 1e6
+                                _meta = _cached_metadata(_ep)
+                                if _meta is not None and "trialType" in _meta.columns:
+                                    _raw_tt = pd.to_numeric(_meta["trialType"], errors="coerce").to_numpy(float)
+                                else:
+                                    _raw_tt = _ep["events"][:, 2].astype(float)
+                                _gi = np.flatnonzero(_raw_tt == 10.0)
+                                _ni = np.flatnonzero(_raw_tt == 20.0)
+                                if len(_gi):
+                                    _comp_go_stack.append(_d[_gi].mean(0))
+                                if len(_ni):
+                                    _comp_nogo_stack.append(_d[_ni].mean(0))
+                            _times_ms = None
+                            if _comp_go_stack or _comp_nogo_stack:
+                                _ref_path = None
+                                for _sj in subjects:
+                                    _ref_path = os.path.join(
+                                        data_dir(selected_run),
+                                        f"sj{_sj:02d}_{cond}_Features-epo.fif")
+                                    if os.path.exists(_ref_path):
+                                        break
+                                if _ref_path and os.path.exists(_ref_path):
+                                    _ref_ep = _load_epochs_cached(_ref_path)
+                                    _times_ms = (_ref_ep["times"] * 1000).tolist()
+                            if _times_ms and _comp_nogo_stack:
+                                _arr = np.vstack(_comp_nogo_stack)
+                                _mu = _arr.mean(0)
+                                _comp_fig.add_trace(go.Scatter(
+                                    x=_times_ms, y=_mu.tolist(),
+                                    mode="lines", name="NoGo",
+                                    line=dict(color="#e74c3c", width=2),
+                                    showlegend=(_cc_cell == "Attend Sit"),
+                                ), row=_cc_r, col=_cc_c)
+                                if len(_comp_nogo_stack) > 1:
+                                    _sem = _arr.std(0) / np.sqrt(len(_comp_nogo_stack))
+                                    _comp_fig.add_trace(go.Scatter(
+                                        x=_times_ms + _times_ms[::-1],
+                                        y=(_mu + _sem).tolist() + (_mu - _sem)[::-1].tolist(),
+                                        fill="toself", fillcolor="rgba(231,76,60,0.12)",
+                                        line=dict(width=0), showlegend=False, hoverinfo="skip",
+                                    ), row=_cc_r, col=_cc_c)
+                                _has_data = True
+                            if _times_ms and _comp_go_stack:
+                                _arr = np.vstack(_comp_go_stack)
+                                _mu = _arr.mean(0)
+                                _comp_fig.add_trace(go.Scatter(
+                                    x=_times_ms, y=_mu.tolist(),
+                                    mode="lines", name="Go",
+                                    line=dict(color="#2980b9", width=2),
+                                    showlegend=(_cc_cell == "Attend Sit"),
+                                ), row=_cc_r, col=_cc_c)
+                                if len(_comp_go_stack) > 1:
+                                    _sem = _arr.std(0) / np.sqrt(len(_comp_go_stack))
+                                    _comp_fig.add_trace(go.Scatter(
+                                        x=_times_ms + _times_ms[::-1],
+                                        y=(_mu + _sem).tolist() + (_mu - _sem)[::-1].tolist(),
+                                        fill="toself", fillcolor="rgba(41,128,185,0.12)",
+                                        line=dict(width=0), showlegend=False, hoverinfo="skip",
+                                    ), row=_cc_r, col=_cc_c)
+                                _has_data = True
+                        else:
+                            if not os.path.exists(epo_path):
+                                continue
+                            try:
+                                _ep = _load_epochs_cached(epo_path)
+                            except Exception:
+                                continue
+                            _ch_picks = [c for c in _comp_channels
+                                         if c in _ep["ch_names"]]
+                            if not _ch_picks:
+                                continue
+                            _ch_idxs = [_ep["ch_names"].index(c) for c in _ch_picks]
+                            _d = _ep["data"][:, _ch_idxs, :].mean(axis=1) * 1e6
+                            _times_ms = (_ep["times"] * 1000).tolist()
+                            _meta = _cached_metadata(_ep)
+                            if _meta is not None and "trialType" in _meta.columns:
+                                _raw_tt = pd.to_numeric(_meta["trialType"], errors="coerce").to_numpy(float)
+                            else:
+                                _raw_tt = _ep["events"][:, 2].astype(float)
+                            _gi = np.flatnonzero(_raw_tt == 10.0)
+                            _ni = np.flatnonzero(_raw_tt == 20.0)
+                            if len(_ni):
+                                _nogo_d = _d[_ni]
+                                _mu = _nogo_d.mean(0)
+                                _sem = _nogo_d.std(0) / np.sqrt(len(_ni))
+                                _comp_fig.add_trace(go.Scatter(
+                                    x=_times_ms, y=_mu.tolist(),
+                                    mode="lines", name="NoGo",
+                                    line=dict(color="#e74c3c", width=2),
+                                    showlegend=(_cc_cell == "Attend Sit"),
+                                ), row=_cc_r, col=_cc_c)
+                                _comp_fig.add_trace(go.Scatter(
+                                    x=_times_ms + _times_ms[::-1],
+                                    y=(_mu + _sem).tolist() + (_mu - _sem)[::-1].tolist(),
+                                    fill="toself", fillcolor="rgba(231,76,60,0.12)",
+                                    line=dict(width=0), showlegend=False, hoverinfo="skip",
+                                ), row=_cc_r, col=_cc_c)
+                                _has_data = True
+                            if len(_gi):
+                                _go_d = _d[_gi]
+                                _mu = _go_d.mean(0)
+                                _sem = _go_d.std(0) / np.sqrt(len(_gi))
+                                _comp_fig.add_trace(go.Scatter(
+                                    x=_times_ms, y=_mu.tolist(),
+                                    mode="lines", name="Go",
+                                    line=dict(color="#2980b9", width=2),
+                                    showlegend=(_cc_cell == "Attend Sit"),
+                                ), row=_cc_r, col=_cc_c)
+                                _comp_fig.add_trace(go.Scatter(
+                                    x=_times_ms + _times_ms[::-1],
+                                    y=(_mu + _sem).tolist() + (_mu - _sem)[::-1].tolist(),
+                                    fill="toself", fillcolor="rgba(41,128,185,0.12)",
+                                    line=dict(width=0), showlegend=False, hoverinfo="skip",
+                                ), row=_cc_r, col=_cc_c)
+                                _has_data = True
+                        break
+
+                    _comp_fig.add_vline(x=0, line_color="gray", line_dash="dot",
+                                        row=_cc_r, col=_cc_c)
+                    _comp_fig.add_vrect(
+                        x0=_win_ms[0], x1=_win_ms[1],
+                        fillcolor="rgba(255,200,0,0.12)", line_width=0,
+                        row=_cc_r, col=_cc_c)
+
+                if _has_data:
+                    _comp_fig.update_xaxes(title_text="Time (ms)", row=2, col=1)
+                    _comp_fig.update_xaxes(title_text="Time (ms)", row=2, col=2)
+                    _comp_fig.update_yaxes(title_text="Amplitude (uV)", row=1, col=1)
+                    _comp_fig.update_yaxes(title_text="Amplitude (uV)", row=2, col=1)
+                    _comp_fig.update_layout(
+                        height=620, template="plotly_white",
+                        legend=dict(orientation="h", y=-0.08),
+                    )
+                    st.plotly_chart(_comp_fig, use_container_width=True)
+                else:
+                    st.info("No data available for this component.")
 
         st.markdown("---")
         st.subheader("Behavior by Movement (Sit vs Walk)")

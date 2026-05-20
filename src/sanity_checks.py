@@ -17,9 +17,11 @@ import pandas as pd
 from config import (
     CONDITIONS,
     DATA_DIR,
+    ERP_COMPONENTS,
     ET_FOLDER_MAP,
     OUTPUT_DATA_DIR,
     OUTPUT_PLOT_DIR,
+    P300_WINDOW,
     SUBJECTS,
     TARGET_CHANNELS,
 )
@@ -99,12 +101,22 @@ def check_erp_go_nogo(sj_num, conditions=None):
 
         ax = axes[i_cond]
         if len(nogo_indices) > 0:
-            erp_nogo = np.mean(data[nogo_indices, :, :], axis=0).mean(axis=0)
+            nogo_data = data[nogo_indices, :, :].mean(axis=1)
+            erp_nogo = nogo_data.mean(axis=0)
+            sem_nogo = nogo_data.std(axis=0) / np.sqrt(len(nogo_indices))
             ax.plot(times_ms, erp_nogo, color="r", linewidth=3, label="NoGo")
+            ax.fill_between(times_ms, erp_nogo - sem_nogo, erp_nogo + sem_nogo,
+                            color="r", alpha=0.15)
         if len(go_indices) > 0:
-            erp_go = np.mean(data[go_indices, :, :], axis=0).mean(axis=0)
+            go_data = data[go_indices, :, :].mean(axis=1)
+            erp_go = go_data.mean(axis=0)
+            sem_go = go_data.std(axis=0) / np.sqrt(len(go_indices))
             ax.plot(times_ms, erp_go, color="b", linewidth=3, label="Go")
+            ax.fill_between(times_ms, erp_go - sem_go, erp_go + sem_go,
+                            color="b", alpha=0.15)
 
+        p300_win_ms = (P300_WINDOW[0] * 1000, P300_WINDOW[1] * 1000)
+        ax.axvspan(p300_win_ms[0], p300_win_ms[1], color="gold", alpha=0.08)
         ax.set_ylim([-20, 20])
         ax.set_xlabel("Time (ms)", fontsize=16)
         ax.set_ylabel("Amplitude (µV)", fontsize=16)
@@ -333,7 +345,8 @@ def plot_pupil_by_outcome(et_tensor_dict, metadata, out_path,
                         color=colors[oc], alpha=0.15)
 
     ax.axvline(x=0, color="k", linestyle="--", linewidth=1)
-    ax.axvspan(300, 500, color="lightgrey", alpha=0.3, label="P300 window")
+    p300_ms = (P300_WINDOW[0] * 1000, P300_WINDOW[1] * 1000)
+    ax.axvspan(p300_ms[0], p300_ms[1], color="lightgrey", alpha=0.3, label="P300 window")
     ax.set_xlabel("Time (ms)", fontsize=12)
     ax.set_ylabel("Pupil diameter (z-scored)", fontsize=12)
     ax.set_title(f"Pupil Diameter by Outcome — {condition_label}", fontsize=14)
@@ -346,6 +359,187 @@ def plot_pupil_by_outcome(et_tensor_dict, metadata, out_path,
     print(f"    Saved: {out_path}")
 
 
+def check_erp_components(sj_num, conditions=None):
+    """Plot Go vs NoGo ERPs for each ERP component (N1, P2, P300) defined in config."""
+    if conditions is None:
+        conditions = CONDITIONS
+    if not ERP_COMPONENTS:
+        print("  No erp.components defined in config — skipping component plots")
+        return
+
+    for comp_name, comp_cfg in ERP_COMPONENTS.items():
+        comp_channels = comp_cfg["channels"]
+        comp_window = comp_cfg["window"]
+        win_ms = (comp_window[0] * 1000, comp_window[1] * 1000)
+
+        fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+        axes = axes.flatten()
+
+        for i_cond, cond in enumerate(conditions):
+            label = cond["eeg_label"]
+            trial_label = cond.get("trial_label", label)
+
+            epochs_file = os.path.join(
+                OUTPUT_DATA_DIR, f"sj{sj_num:02d}_{label}_EEG_Prepro1-epo.fif")
+            if not os.path.exists(epochs_file):
+                axes[i_cond].text(0.5, 0.5, "File not found",
+                                  ha="center", va="center")
+                continue
+
+            epochs = mne.read_epochs(epochs_file, preload=True, verbose=False)
+
+            if epochs.metadata is not None and len(epochs.metadata) == len(epochs):
+                trial_data = epochs.metadata.copy()
+            else:
+                trial_data_file = os.path.join(
+                    OUTPUT_DATA_DIR, f"sj{sj_num:02d}_{label}_trialData.csv")
+                if os.path.exists(trial_data_file):
+                    trial_data = pd.read_csv(trial_data_file)
+                else:
+                    continue
+
+            if "outcome" in trial_data.columns:
+                keep = trial_data["outcome"] != "COMMISSION_ERROR"
+                trial_data = trial_data[keep].reset_index(drop=True)
+                epochs = epochs[keep]
+
+            if "trialType" not in trial_data.columns:
+                continue
+
+            go_idx = np.where(trial_data["trialType"] == 10)[0]
+            nogo_idx = np.where(trial_data["trialType"] == 20)[0]
+
+            chan_to_plot = [c for c in comp_channels if c in epochs.ch_names]
+            if not chan_to_plot:
+                axes[i_cond].text(
+                    0.5, 0.5,
+                    f"Channel(s) {comp_channels} not found",
+                    ha="center", va="center", transform=axes[i_cond].transAxes)
+                continue
+
+            picked = epochs.copy().pick(chan_to_plot)
+            times_ms = picked.times * 1000
+            data = picked.get_data() * 1e6
+
+            ax = axes[i_cond]
+            if len(nogo_idx) > 0:
+                nogo_data = data[nogo_idx, :, :].mean(axis=1)
+                mu = nogo_data.mean(axis=0)
+                sem = nogo_data.std(axis=0) / np.sqrt(len(nogo_idx))
+                ax.plot(times_ms, mu, color="r", linewidth=3, label="NoGo")
+                ax.fill_between(times_ms, mu - sem, mu + sem, color="r", alpha=0.15)
+            if len(go_idx) > 0:
+                go_data = data[go_idx, :, :].mean(axis=1)
+                mu = go_data.mean(axis=0)
+                sem = go_data.std(axis=0) / np.sqrt(len(go_idx))
+                ax.plot(times_ms, mu, color="b", linewidth=3, label="Go")
+                ax.fill_between(times_ms, mu - sem, mu + sem, color="b", alpha=0.15)
+
+            ax.axvspan(win_ms[0], win_ms[1], color="gold", alpha=0.12)
+            ax.set_xlabel("Time (ms)", fontsize=16)
+            ax.set_ylabel("Amplitude (uV)", fontsize=16)
+            ax.set_title(trial_label, fontsize=18)
+            ax.axvline(x=0, color="k", linestyle="--", linewidth=1)
+            ax.legend(fontsize=14)
+            ax.tick_params(labelsize=14)
+            ax.grid(True, alpha=0.3)
+
+        for i in range(len(conditions), len(axes)):
+            axes[i].set_visible(False)
+
+        ch_str = ", ".join(comp_channels)
+        fig.suptitle(
+            f"sj{sj_num:02d} {comp_name.upper()} ERP ({ch_str}, "
+            f"{win_ms[0]:.0f}–{win_ms[1]:.0f} ms)",
+            fontsize=20, y=0.995,
+        )
+        plt.tight_layout()
+        out = os.path.join(
+            OUTPUT_PLOT_DIR, f"sj{sj_num:02d}_L1_ERP_{comp_name}.png")
+        plt.savefig(out, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved: {out}")
+
+
+def plot_erp_topomap(sj_num, conditions=None):
+    """Plot scalp topographic maps of mean ERP amplitude (P300 window) for Go and NoGo."""
+    if conditions is None:
+        conditions = CONDITIONS
+
+    p300_cfg = ERP_COMPONENTS.get("p300", {"window": P300_WINDOW})
+    tmin, tmax = p300_cfg["window"]
+
+    for cond in conditions:
+        label = cond["eeg_label"]
+        trial_label = cond.get("trial_label", label)
+
+        epochs_file = os.path.join(
+            OUTPUT_DATA_DIR, f"sj{sj_num:02d}_{label}_EEG_Prepro1-epo.fif")
+        if not os.path.exists(epochs_file):
+            continue
+
+        epochs = mne.read_epochs(epochs_file, preload=True, verbose=False)
+        epochs.pick_types(eeg=True)
+
+        if epochs.metadata is not None and len(epochs.metadata) == len(epochs):
+            trial_data = epochs.metadata.copy()
+        else:
+            trial_data_file = os.path.join(
+                OUTPUT_DATA_DIR, f"sj{sj_num:02d}_{label}_trialData.csv")
+            if os.path.exists(trial_data_file):
+                trial_data = pd.read_csv(trial_data_file)
+            else:
+                continue
+
+        if "outcome" in trial_data.columns:
+            keep = trial_data["outcome"] != "COMMISSION_ERROR"
+            trial_data = trial_data[keep].reset_index(drop=True)
+            epochs = epochs[keep]
+
+        if "trialType" not in trial_data.columns:
+            continue
+
+        go_idx = np.where(trial_data["trialType"] == 10)[0]
+        nogo_idx = np.where(trial_data["trialType"] == 20)[0]
+
+        times = epochs.times
+        t_mask = (times >= tmin) & (times <= tmax)
+        data = epochs.get_data() * 1e6
+
+        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+
+        if len(go_idx) > 0:
+            go_topo = data[go_idx][:, :, t_mask].mean(axis=(0, 2))
+            mne.viz.plot_topomap(
+                go_topo, epochs.info, axes=axes[0], show=False,
+                cmap="RdBu_r", vlim=(-8, 8))
+            axes[0].set_title(f"Go (n={len(go_idx)})", fontsize=14)
+        else:
+            axes[0].text(0.5, 0.5, "No Go trials", ha="center", va="center")
+
+        if len(nogo_idx) > 0:
+            nogo_topo = data[nogo_idx][:, :, t_mask].mean(axis=(0, 2))
+            mne.viz.plot_topomap(
+                nogo_topo, epochs.info, axes=axes[1], show=False,
+                cmap="RdBu_r", vlim=(-8, 8))
+            axes[1].set_title(f"NoGo (n={len(nogo_idx)})", fontsize=14)
+        else:
+            axes[1].text(0.5, 0.5, "No NoGo trials", ha="center", va="center")
+
+        win_ms = (tmin * 1000, tmax * 1000)
+        fig.suptitle(
+            f"sj{sj_num:02d} {trial_label} — Topomap "
+            f"({win_ms[0]:.0f}–{win_ms[1]:.0f} ms mean)",
+            fontsize=16,
+        )
+        plt.tight_layout()
+        out = os.path.join(
+            OUTPUT_PLOT_DIR, f"sj{sj_num:02d}_L1_topomap_{label}.png")
+        plt.savefig(out, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved: {out}")
+
+
 def run():
     for sj_num in SUBJECTS:
         print(f"\n{'='*60}")
@@ -354,6 +548,8 @@ def run():
 
         print("\n--- Layer 1: Modality Independence ---")
         check_erp_go_nogo(sj_num)
+        check_erp_components(sj_num)
+        plot_erp_topomap(sj_num)
         check_trial_counts(sj_num)
         check_gaze_xy_pupil(sj_num)
 

@@ -43,9 +43,19 @@ vision_conditions:
 erp:
   target_channels: ["Pz"]
   codes: [1, 2, 3]
+  components:
+    p300:
+      channels: ["Pz"]
+      window: [0.25, 0.70]
+    n1:
+      channels: ["Cz"]
+      window: [0.08, 0.12]
+    p2:
+      channels: ["FCz"]
+      window: [0.15, 0.20]
 
 features:
-  p300_window: [0.25, 0.50]
+  p300_window: [0.25, 0.70]
 
 nogo:
   n_folds: 5

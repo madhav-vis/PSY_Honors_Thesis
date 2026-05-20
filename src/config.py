@@ -62,6 +62,13 @@ _erp = CFG["erp"]
 TARGET_CHANNELS = _erp["target_channels"]
 ERP_CODES = set(_erp["codes"])
 
+ERP_COMPONENTS = {}
+for _comp_name, _comp_cfg in _erp.get("components", {}).items():
+    ERP_COMPONENTS[_comp_name] = {
+        "channels": _comp_cfg["channels"],
+        "window": tuple(_comp_cfg["window"]),
+    }
+
 # Feature extraction
 _feat = CFG["features"]
 P300_WINDOW = tuple(_feat["p300_window"])

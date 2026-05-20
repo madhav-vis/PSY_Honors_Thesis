@@ -7,6 +7,7 @@ from scipy.signal import welch
 
 from config import (
     CONDITIONS,
+    ERP_COMPONENTS,
     OUTPUT_DATA_DIR,
     P300_WINDOW,
     SUBJECTS,
@@ -120,6 +121,19 @@ def extract_features(sj_num, cond):
     meta["alpha_frontal_uV2"] = alpha_frontal
     meta["alpha_parietal_uV2"] = alpha_parietal
     meta["alpha_occipital_uV2"] = alpha_occipital
+
+    for comp_name in ["n1", "p2"]:
+        comp_cfg = ERP_COMPONENTS.get(comp_name)
+        if comp_cfg is None:
+            continue
+        available = [c for c in comp_cfg["channels"] if c in epochs.ch_names]
+        if available:
+            amp = _mean_amplitude(epochs, available, comp_cfg["window"])
+            print(f"    {comp_name.upper()} cluster: using {available}")
+        else:
+            amp = np.full(len(epochs), np.nan)
+            print(f"    {comp_name.upper()} cluster: no channels available — filling NaN")
+        meta[f"{comp_name.upper()}_cluster_uV"] = amp
 
     epochs.metadata = meta
 
