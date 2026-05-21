@@ -1,3 +1,4 @@
+import gc
 import os
 
 import mne
@@ -58,6 +59,7 @@ def prepare_dl_data(sj_num, cond, test_size=0.2, random_state=42):
     X_eeg = _epochs_to_tensor(epochs)
     meta = (epochs.metadata.copy().reset_index(drop=True)
             if epochs.metadata is not None else pd.DataFrame())
+    del epochs
     meta["subject_id"] = sj_num
 
     if "trialType" in meta.columns:
@@ -115,6 +117,7 @@ def prepare_dl_data(sj_num, cond, test_size=0.2, random_state=42):
 
     X_eeg_train = X_eeg[train_idx].copy()
     X_eeg_val = X_eeg[val_idx].copy()
+    del X_eeg
     y_train = y[train_idx]
     y_val = y[val_idx]
     meta_train = meta.iloc[train_idx].reset_index(drop=True)
@@ -155,6 +158,7 @@ def prepare_dl_data(sj_num, cond, test_size=0.2, random_state=42):
     if X_et is not None:
         X_et_train = X_et[train_idx].copy()
         X_et_val = X_et[val_idx].copy()
+        del X_et
         X_et_train, X_et_val, _, _ = _normalize_epochs(X_et_train, X_et_val)
 
         np.save(os.path.join(out_dir, f"{prefix}_X_et_train.npy"), X_et_train)
@@ -174,6 +178,7 @@ def run():
         for cond in CONDITIONS:
             print(f"  Condition: {cond['eeg_label']}")
             prepare_dl_data(sj_num, cond)
+            gc.collect()
     print("\nDL preparation complete!")
 
 

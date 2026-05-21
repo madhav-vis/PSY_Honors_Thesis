@@ -1,3 +1,4 @@
+import gc
 import os
 
 import numpy as np
@@ -119,6 +120,7 @@ def run():
         for cond in CONDITIONS:
             print(f"  Condition: {cond['eeg_label']}")
             preprocess_et_wide(sj_num, cond)
+            gc.collect()
     print("\nET preprocessing complete!")
 
 

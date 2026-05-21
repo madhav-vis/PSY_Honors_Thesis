@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import gc
 import json
 import os
 import sys
@@ -127,7 +128,8 @@ def load_tensors(run_name, condition):
     data = {}
     for split in ("train", "val"):
         data[f"X_eeg_{split}"] = np.load(
-            os.path.join(tensor_dir, f"{prefix}_X_eeg_{split}.npy"))
+            os.path.join(tensor_dir, f"{prefix}_X_eeg_{split}.npy"),
+            mmap_mode='r')
         data[f"y_{split}"] = np.load(
             os.path.join(tensor_dir, f"{prefix}_y_{split}.npy"))
         data[f"meta_{split}"] = pd.read_csv(
@@ -135,7 +137,7 @@ def load_tensors(run_name, condition):
 
         et_path = os.path.join(tensor_dir, f"{prefix}_X_et_{split}.npy")
         if os.path.exists(et_path):
-            data[f"X_et_{split}"] = np.load(et_path)
+            data[f"X_et_{split}"] = np.load(et_path, mmap_mode='r')
 
     return data
 
@@ -1209,7 +1211,7 @@ def _nogo_kfold(model_factory, X_eeg, labels, n_folds=5, n_epochs=100,
         print(f"\n    Fold {fi+1}/{n_folds} "
               f"(train={len(tr_idx)}, test={len(te_idx)})")
 
-        X_tr, X_te = X_eeg[tr_idx].copy(), X_eeg[te_idx].copy()
+        X_tr, X_te = X_eeg[tr_idx], X_eeg[te_idx]
         y_tr, y_te = labels[tr_idx], labels[te_idx]
 
         for ch in range(X_tr.shape[1]):
@@ -1323,6 +1325,9 @@ def _nogo_kfold(model_factory, X_eeg, labels, n_folds=5, n_epochs=100,
 
         if fi == n_folds - 1 and best_state:
             fold_results[-1]["_best_state"] = best_state
+
+        del X_tr, X_te, tr_t, te_t, train_ld, test_ld, model, opt, sched, criterion
+        gc.collect()
 
     if not fold_results:
         return {"error": "No valid folds completed"}
@@ -1776,7 +1781,7 @@ def phase8_loso(run_name, cfg=None):
         train_mask = sids != held_out
         test_mask = sids == held_out
 
-        X_tr, X_te = X[train_mask].copy(), X[test_mask].copy()
+        X_tr, X_te = X[train_mask], X[test_mask]
         y_tr, y_te = labels[train_mask], labels[test_mask]
 
         X_tr, X_te = _normalize_cross_subject(X_tr, X_te)
@@ -1785,6 +1790,8 @@ def phase8_loso(run_name, cfg=None):
             lambda: EEGNet(n_ch, n_t, 2, **ekw),
             X_tr, y_tr, X_te, y_te, **tkw,
         )
+        del X_tr, X_te
+        gc.collect()
         if result is None:
             print(f"    Skipped — single class in split")
             continue
@@ -1833,7 +1840,7 @@ def phase8_loso(run_name, cfg=None):
             if tr_mask.sum() < 4 or te_mask.sum() < 2:
                 continue
 
-            X_tr, X_te = X[tr_mask].copy(), X[te_mask].copy()
+            X_tr, X_te = X[tr_mask], X[te_mask]
             y_tr, y_te = labels[tr_mask], labels[te_mask]
             X_tr, X_te = _normalize_cross_subject(X_tr, X_te)
 
@@ -1841,6 +1848,8 @@ def phase8_loso(run_name, cfg=None):
                 lambda: EEGNet(n_ch, n_t, 2, **ekw),
                 X_tr, y_tr, X_te, y_te, **tkw,
             )
+            del X_tr, X_te
+            gc.collect()
             if result:
                 cond_folds.append(result)
 
@@ -1958,10 +1967,12 @@ def phase9_gaze_walking(run_name, cfg=None):
     model_a_folds = []
     for held_out in subjects:
         tr = sids_f != held_out; te = sids_f == held_out
-        X_tr, X_te = X[tr].copy(), X[te].copy()
+        X_tr, X_te = X[tr], X[te]
         X_tr, X_te = _normalize_cross_subject(X_tr, X_te)
         r = _loso_train_eval(lambda: EEGNet(n_ch, n_t, 2, **ekw),
                              X_tr, labels[tr], X_te, labels[te], **tkw)
+        del X_tr, X_te
+        gc.collect()
         if r:
             r["held_out"] = int(held_out)
             model_a_folds.append(r)
@@ -1974,7 +1985,7 @@ def phase9_gaze_walking(run_name, cfg=None):
         X_gaze = _encode_gaze_onehot(gaze_seqs)
         for held_out in subjects:
             tr = sids_f != held_out; te = sids_f == held_out
-            X_tr, X_te = X[tr].copy(), X[te].copy()
+            X_tr, X_te = X[tr], X[te]
             X_tr, X_te = _normalize_cross_subject(X_tr, X_te)
             r = _loso_train_eval(
                 lambda: NoGoFusionNet(n_ch, n_t, n_cats,
@@ -1984,6 +1995,8 @@ def phase9_gaze_walking(run_name, cfg=None):
                 X_gaze_train=X_gaze[tr], X_gaze_test=X_gaze[te],
                 is_fusion=True,
             )
+            del X_tr, X_te
+            gc.collect()
             if r:
                 r["held_out"] = int(held_out)
                 model_b_folds.append(r)
@@ -2110,7 +2123,6 @@ def phase10_cross_condition(run_name, cfg=None):
 
         print(f"    Train: {len(y_tr)} trials  Test: {len(y_te)} trials")
 
-        X_tr, X_te = X_tr.copy(), X_te.copy()
         X_tr, X_te = _normalize_cross_subject(X_tr, X_te)
         n_ch, n_t = X_tr.shape[1], X_tr.shape[2]
 

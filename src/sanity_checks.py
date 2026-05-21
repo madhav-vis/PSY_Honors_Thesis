@@ -5,6 +5,7 @@ Sanity checks — Layer 1 only (each modality works independently):
   - Trial count summary
 """
 
+import gc
 import os
 
 import mne
@@ -552,6 +553,8 @@ def run():
         plot_erp_topomap(sj_num)
         check_trial_counts(sj_num)
         check_gaze_xy_pupil(sj_num)
+        plt.close('all')
+        gc.collect()
 
     print("\nAll sanity checks complete!")
 

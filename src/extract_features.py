@@ -1,3 +1,4 @@
+import gc
 import os
 
 import mne
@@ -21,7 +22,7 @@ def _mean_amplitude(epochs, channels, window):
     if not picks:
         return np.full(len(epochs), np.nan)
 
-    data = epochs.copy().pick(picks).get_data()  # (n_epochs, n_channels, n_times)
+    data = epochs.get_data(picks=picks)
     times = epochs.times
     t_mask = (times >= window[0]) & (times <= window[1])
     return data[:, :, t_mask].mean(axis=(1, 2)) * 1e6
@@ -33,7 +34,7 @@ def _alpha_power(epochs, channels, tmin, tmax, freq_range=(8, 12)):
     if not picks:
         return np.full(len(epochs), np.nan)
 
-    data = epochs.copy().pick(picks).get_data()
+    data = epochs.get_data(picks=picks)
     times = epochs.times
     t_mask = (times >= tmin) & (times <= tmax)
     data_win = data[:, :, t_mask]
@@ -157,6 +158,7 @@ def run():
         for cond in CONDITIONS:
             print(f"  Condition: {cond['eeg_label']}")
             extract_features(sj_num, cond)
+            gc.collect()
     print("\nFeature extraction complete!")
 
 
