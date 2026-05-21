@@ -3,6 +3,7 @@
 
 # EEG
 mne>=1.6
+gedai>=0.1
 
 # Deep Learning
 torch>=2.0
