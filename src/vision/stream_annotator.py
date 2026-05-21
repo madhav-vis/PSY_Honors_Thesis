@@ -13,7 +13,11 @@ Six tabs:
 
 import glob
 import os
+import subprocess
 import sys
+import threading
+import time
+from collections import deque
 
 import numpy as np
 import pandas as pd
@@ -55,6 +59,75 @@ from vision.vision_main import generate_crops_for_condition
 LABEL_NAMES = list(CATEGORIES.keys())
 RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
+
+
+def _find_venv_python() -> str:
+    candidates = [
+        os.path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe"),
+        os.path.join(PROJECT_ROOT, ".venv", "bin", "python"),
+        os.path.join(PROJECT_ROOT, ".venv", "bin", "python3.11"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return sys.executable
+
+
+VENV_PYTHON = _find_venv_python()
+
+
+def _run_subprocess_with_status(cmd, label, timeout_s=1800):
+    """Run a subprocess with live output in a Streamlit status widget."""
+    with st.status(f"Running {label}...", expanded=True) as status:
+        log_placeholder = st.empty()
+        try:
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+                bufsize=1, cwd=PROJECT_ROOT,
+            )
+            log_lines: deque = deque()
+            log_lock = threading.Lock()
+
+            def _drain():
+                for line in iter(process.stdout.readline, ""):
+                    with log_lock:
+                        log_lines.append(line)
+                process.stdout.close()
+
+            drain_thread = threading.Thread(target=_drain, daemon=True)
+            drain_thread.start()
+
+            start_time = time.time()
+            last_render = 0.0
+
+            while process.poll() is None:
+                if time.time() - start_time > timeout_s:
+                    process.kill()
+                    st.error(f"{label} timed out ({timeout_s // 60} min limit)")
+                    break
+                now = time.time()
+                if now - last_render > 2.0:
+                    with log_lock:
+                        tail = "".join(list(log_lines)[-150:])
+                    if tail:
+                        log_placeholder.code(tail, language="text")
+                    last_render = now
+                time.sleep(1.0)
+
+            drain_thread.join(timeout=5.0)
+
+            if process.returncode == 0:
+                status.update(label=f"{label} completed!", state="complete")
+            else:
+                status.update(label=f"{label} failed (exit {process.returncode})", state="error")
+                with log_lock:
+                    tail = "".join(list(log_lines)[-200:])
+                if tail:
+                    log_placeholder.code(tail, language="text")
+        except Exception as e:
+            st.error(f"Error running {label}: {e}")
+    st.cache_data.clear()
 
 # ── Page config ───────────────────────────────────────────────
 
@@ -863,9 +936,25 @@ with t_train:
             emb_lookup = _find_all_embeddings()
             if not emb_lookup:
                 st.warning(
-                    "No CLIP embeddings found. Run the vision pipeline first "
-                    "(phases 1–3 extract embeddings into `runs/`)."
+                    "No CLIP embeddings found. Run the vision pipeline to "
+                    "extract embeddings into `runs/`."
                 )
+                _avail_runs = _list_runs()
+                if _avail_runs:
+                    _vision_run = st.selectbox(
+                        "Run directory", _avail_runs,
+                        key="vision_pipeline_run_select",
+                    )
+                    if st.button("▶ Run Vision Pipeline", type="primary",
+                                 key="btn_run_vision_pipeline"):
+                        _run_dir = os.path.join(RUNS_ROOT, _vision_run)
+                        _cmd = [VENV_PYTHON,
+                                os.path.join(PROJECT_ROOT, "src", "vision", "vision_main.py"),
+                                "--run-dir", _run_dir]
+                        _run_subprocess_with_status(_cmd, "Vision pipeline")
+                        st.rerun()
+                else:
+                    st.info("No runs found. Run the EEG/ET pipeline first.")
             else:
                 n_emb_pairs = len(emb_lookup)
                 st.info(

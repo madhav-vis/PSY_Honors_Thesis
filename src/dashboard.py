@@ -576,7 +576,12 @@ with tab_run:
     with col_launch:
         st.subheader("Run Pipeline")
 
-        run_main = st.button("Run EEG/ET Pipeline", type="primary")
+        run_main = st.button("Run EEG/ET Pipeline", type="primary",
+                              disabled=st.session_state.get("pipeline_running", False))
+        run_overview = st.button("Run Overview Only",
+                                 help="Steps 1–4 only (EEG, ET, Fuse, Features). "
+                                      "Skips DL Prep and Sanity Checks.",
+                                 disabled=st.session_state.get("pipeline_running", False))
 
         if "pipeline_log" not in st.session_state:
             st.session_state.pipeline_log = ""
@@ -679,6 +684,23 @@ with tab_run:
             except Exception:
                 pass
             _run_pipeline_with_progress(cmd, "EEG/ET pipeline", _eeg_run_dir, 1800)
+
+        if run_overview and not st.session_state.pipeline_running:
+            cmd = [VENV_PYTHON, os.path.join(PROJECT_ROOT, "src", "main.py"),
+                   "eeg", "et", "fuse", "features"]
+            _ov_run_dir = None
+            try:
+                with open(CONFIG_PATH) as _f:
+                    _cfg = yaml.safe_load(_f)
+                _run_name = _cfg.get("run_name", "")
+                _date = _cfg.get("date", "auto")
+                if _date == "auto":
+                    import datetime
+                    _date = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
+                _ov_run_dir = os.path.join(RUNS_ROOT, f"{_date}_{_run_name}")
+            except Exception:
+                pass
+            _run_pipeline_with_progress(cmd, "Overview pipeline", _ov_run_dir, 1200)
 
         if st.session_state.pipeline_log:
             with st.expander("Pipeline Output", expanded=True):
