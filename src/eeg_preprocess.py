@@ -1,3 +1,4 @@
+import gc
 import os
 
 import mne
@@ -266,6 +267,8 @@ def preprocess_eeg(sj_num, cond):
         preload=True,
         verbose=False,
     )
+    del raw
+    gc.collect()
     epochs.apply_baseline(baseline=BASELINE)
     print(f"    Created {len(epochs)} epochs")
 
@@ -375,6 +378,7 @@ def run():
         for cond in CONDITIONS:
             print(f"  Processing condition: {cond['eeg_label']}")
             preprocess_eeg(sj_num, cond)
+            gc.collect()
     print("\nEEG preprocessing complete!")
 
 

@@ -1,3 +1,4 @@
+import gc
 import os
 
 import mne
@@ -87,6 +88,7 @@ def run():
         for cond in CONDITIONS:
             print(f"  Condition: {cond['eeg_label']}")
             fuse(sj_num, cond)
+            gc.collect()
     print("\nEEG + ET fusion complete!")
 
 

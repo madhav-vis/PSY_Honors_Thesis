@@ -77,10 +77,10 @@ def infer_blink_intervals_from_aperture(
     t_ns = df_eye[_TS_NS].to_numpy(dtype=np.float64)
     is_blink = np.zeros(len(df_eye), dtype=bool)
     if _APERT_L in df_eye.columns:
-        a_l = df_eye[_APERT_L].to_numpy(dtype=np.float64)
+        a_l = df_eye[_APERT_L].to_numpy(dtype=np.float32)
         is_blink |= np.isfinite(a_l) & (a_l <= mm_thresh)
     if _APERT_R in df_eye.columns:
-        a_r = df_eye[_APERT_R].to_numpy(dtype=np.float64)
+        a_r = df_eye[_APERT_R].to_numpy(dtype=np.float32)
         is_blink |= np.isfinite(a_r) & (a_r <= mm_thresh)
     if not np.any(is_blink):
         return []
@@ -131,35 +131,35 @@ def build_axis_gyro_pupil_series(
     t_s = (t_ns - t0) / 1e9
     t_abs_s = t_ns / 1e9
 
-    u_l = _unit_rows(df[_OPT_L].to_numpy(dtype=np.float64))
-    u_r = _unit_rows(df[_OPT_R].to_numpy(dtype=np.float64))
+    u_l = _unit_rows(df[_OPT_L].to_numpy(dtype=np.float32))
+    u_r = _unit_rows(df[_OPT_R].to_numpy(dtype=np.float32))
     w_l = _angular_speed_deg_s(u_l, t_s)
     w_r = _angular_speed_deg_s(u_r, t_s)
     omega = 0.5 * (w_l + w_r)
 
     if _PUP_L in df.columns and _PUP_R in df.columns:
         pupil = (
-            df[_PUP_L].to_numpy(dtype=np.float64)
-            + df[_PUP_R].to_numpy(dtype=np.float64)
+            df[_PUP_L].to_numpy(dtype=np.float32)
+            + df[_PUP_R].to_numpy(dtype=np.float32)
         ) / 2.0
     elif _PUP_L in df.columns:
-        pupil = df[_PUP_L].to_numpy(dtype=np.float64)
+        pupil = df[_PUP_L].to_numpy(dtype=np.float32)
     elif _PUP_R in df.columns:
-        pupil = df[_PUP_R].to_numpy(dtype=np.float64)
+        pupil = df[_PUP_R].to_numpy(dtype=np.float32)
     else:
         pupil = np.full(len(t_s), np.nan)
 
     imu_path = os.path.join(eye_dir, "imu.csv")
     has_imu = os.path.isfile(imu_path)
-    gyro_mag = np.full(len(t_s), np.nan, dtype=np.float64)
+    gyro_mag = np.full(len(t_s), np.nan, dtype=np.float32)
     if has_imu:
         try:
             imu = pd.read_csv(imu_path)
             if all(c in imu.columns for c in (_TS_NS, _GYRO_X, _GYRO_Y, _GYRO_Z)):
                 t_imu = (imu[_TS_NS].to_numpy(dtype=np.float64) - t0) / 1e9
-                gx = imu[_GYRO_X].to_numpy(dtype=np.float64)
-                gy = imu[_GYRO_Y].to_numpy(dtype=np.float64)
-                gz = imu[_GYRO_Z].to_numpy(dtype=np.float64)
+                gx = imu[_GYRO_X].to_numpy(dtype=np.float32)
+                gy = imu[_GYRO_Y].to_numpy(dtype=np.float32)
+                gz = imu[_GYRO_Z].to_numpy(dtype=np.float32)
                 gmag = np.sqrt(gx * gx + gy * gy + gz * gz)
                 order = np.argsort(t_imu)
                 t_imu = t_imu[order]
@@ -172,10 +172,10 @@ def build_axis_gyro_pupil_series(
                         bounds_error=False,
                         fill_value=np.nan,
                     )
-                    gyro_mag = np.asarray(finterp(t_s), dtype=np.float64)
+                    gyro_mag = np.asarray(finterp(t_s), dtype=np.float32)
         except Exception:
             has_imu = False
-            gyro_mag = np.full(len(t_s), np.nan, dtype=np.float64)
+            gyro_mag = np.full(len(t_s), np.nan, dtype=np.float32)
 
     n_raw = len(t_s)
     if n_raw > max_points:
@@ -216,7 +216,7 @@ def fig_axis_gyro_pupil_triptych(
     vision_s: np.ndarray | None = None,
 ) -> go.Figure:
     """Three stacked panels: optical-axis speed, gyro magnitude, pupil (shared x)."""
-    t = np.asarray(series["t_s"] if x_s is None else x_s, dtype=np.float64)
+    t = np.asarray(series["t_s"] if x_s is None else x_s, dtype=np.float32)
     fig = make_subplots(
         rows=3,
         cols=1,

@@ -3,6 +3,7 @@ Mobile EEG + Eyetracking Pipeline Dashboard
 Run:  streamlit run src/dashboard.py
 """
 
+import gc
 import json
 import os
 import subprocess
@@ -127,18 +128,20 @@ def _et_folder_map():
         return {}
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=120, max_entries=8)
 def _load_epochs_cached(epo_path):
     """Cache-friendly epoch loader — returns serializable dicts instead of MNE objects."""
     epochs = mne.read_epochs(epo_path, preload=True, verbose=False)
     meta = epochs.metadata
-    return {
+    result = {
         "data": epochs.get_data(),
         "times": epochs.times,
         "ch_names": list(epochs.ch_names),
         "metadata": meta.to_dict("list") if meta is not None else None,
         "events": epochs.events,
     }
+    del epochs
+    return result
 
 
 def _cached_metadata(ep):
@@ -148,7 +151,7 @@ def _cached_metadata(ep):
     return pd.DataFrame(ep["metadata"])
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=120)
 def _load_or_build_erp_cache(rn, sj, conds_tuple):
     """Load precomputed ERP summaries from disk, or build + persist them."""
     cache_path = os.path.join(data_dir(rn), f"dashboard_cache_sj{sj:02d}.json")
@@ -209,7 +212,7 @@ def _load_or_build_erp_cache(rn, sj, conds_tuple):
 # ── Cross-subject aggregation helpers ────────────────────────────
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=180)
 def _load_or_build_all_erp_cache(rn, subjects_tuple, conds_tuple):
     """Grand-average ERP traces across `subjects_tuple` for each grid cell.
 
@@ -489,6 +492,11 @@ def _plot_sit_walk_behavior_matplotlib(beh_df):
 # ── Sidebar ──────────────────────────────────────────────────
 
 st.sidebar.header("Run History")
+
+if st.sidebar.button("Clear memory cache"):
+    st.cache_data.clear()
+    gc.collect()
+    st.rerun()
 
 runs = list_runs()
 if not runs:
