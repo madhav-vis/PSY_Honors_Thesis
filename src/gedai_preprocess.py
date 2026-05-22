@@ -14,6 +14,13 @@ import mne
 from gedai import Gedai
 
 
+STRENGTH_PRESETS = {
+    "auto": 3.0,
+    "auto+": 1.0,
+    "auto-": 6.0,
+}
+
+
 def apply_gedai(
     raw: mne.io.BaseRaw,
     *,
@@ -21,6 +28,7 @@ def apply_gedai(
     wavelet_level: int = 0,
     reference_cov: str = "leadfield",
     sensai_method: str = "optimize",
+    denoising_strength: str | float = "auto-",
     output_plot_dir: str | None = None,
     label: str = "",
 ) -> tuple[mne.io.BaseRaw, None]:
@@ -39,6 +47,12 @@ def apply_gedai(
         geometry, ``"identity"`` for a simple reference.
     sensai_method : str
         SENSAI thresholding strategy (``"optimize"`` recommended).
+    denoising_strength : str or float
+        Controls artifact suppression aggressiveness:
+        - ``"auto"`` (default): balanced, noise_multiplier=3.0
+        - ``"auto+"``: conservative (preserves signal), noise_multiplier=1.0
+        - ``"auto-"``: aggressive (removes more noise), noise_multiplier=6.0
+        - float: manual noise_multiplier value
     output_plot_dir : str or None
         If given, save diagnostic plots here.
     label : str
@@ -52,6 +66,16 @@ def apply_gedai(
         Placeholder for API consistency (score is logged, not returned
         by the library).
     """
+    if isinstance(denoising_strength, str):
+        if denoising_strength not in STRENGTH_PRESETS:
+            raise ValueError(
+                f"denoising_strength must be 'auto', 'auto+', 'auto-', or a float, "
+                f"got '{denoising_strength}'"
+            )
+        noise_multiplier = STRENGTH_PRESETS[denoising_strength]
+    else:
+        noise_multiplier = float(denoising_strength)
+
     picks_eeg = mne.pick_types(raw.info, eeg=True, exclude="bads")
     n_ch = len(picks_eeg)
 
@@ -65,7 +89,7 @@ def apply_gedai(
 
     print(f"    GEDAI [{label}]: fitting on {n_ch} EEG channels "
           f"(wavelet={wavelet_type}, level={wavelet_level}, "
-          f"ref_cov={reference_cov})")
+          f"ref_cov={reference_cov}, strength={denoising_strength})")
 
     gedai = Gedai(
         wavelet_type=wavelet_type,
@@ -76,6 +100,7 @@ def apply_gedai(
         raw,
         reference_cov=reference_cov,
         sensai_method=sensai_method,
+        noise_multiplier=noise_multiplier,
     )
 
     raw_clean = gedai.transform_raw(raw)

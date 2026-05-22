@@ -14,6 +14,7 @@ from config import (
     DETECT_BAD_CHANNELS,
     FILTER_HIGH,
     FILTER_LOW,
+    GEDAI_STRENGTH,
     OUTPUT_DATA_DIR,
     OUTPUT_PLOT_DIR,
     REF_CHANNELS,
@@ -172,6 +173,7 @@ def preprocess_eeg(sj_num, cond):
         gedai_plot_dir = os.path.join(OUTPUT_PLOT_DIR, "gedai")
         raw, _ = apply_gedai(
             raw,
+            denoising_strength=GEDAI_STRENGTH,
             output_plot_dir=gedai_plot_dir,
             label=f"sj{sj_num:02d}_{label}",
         )

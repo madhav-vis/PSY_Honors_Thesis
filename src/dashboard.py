@@ -241,13 +241,17 @@ def _load_or_build_all_erp_cache(rn, subjects_tuple, conds_tuple):
                 "n_go": 0,
                 "n_nogo": 0,
                 "n_subjects": 0,
+                "go_sem_fallback": None,
+                "nogo_sem_fallback": None,
             })
             if item.get("go") is not None:
                 slot["go_stack"].append(np.asarray(item["go"], dtype=float))
                 slot["n_go"] += int(item.get("n_go", 0))
+                slot["go_sem_fallback"] = item.get("go_sem")
             if item.get("nogo") is not None:
                 slot["nogo_stack"].append(np.asarray(item["nogo"], dtype=float))
                 slot["n_nogo"] += int(item.get("n_nogo", 0))
+                slot["nogo_sem_fallback"] = item.get("nogo_sem")
             slot["n_subjects"] += 1
 
     for cell, slot in per_cell_acc.items():
@@ -255,12 +259,29 @@ def _load_or_build_all_erp_cache(rn, subjects_tuple, conds_tuple):
         nogo_arr = np.vstack(slot["nogo_stack"]) if slot["nogo_stack"] else None
         n_go_sj = len(slot["go_stack"])
         n_nogo_sj = len(slot["nogo_stack"])
+
+        # When multiple subjects contribute, use between-subject SEM.
+        # When only 1 subject contributes, fall back to that subject's
+        # within-subject trial-level SEM (already stored in per-subject cache).
+        go_sem = None
+        nogo_sem = None
+        if go_arr is not None:
+            if n_go_sj > 1:
+                go_sem = (go_arr.std(0) / np.sqrt(n_go_sj)).tolist()
+            else:
+                go_sem = slot.get("go_sem_fallback")
+        if nogo_arr is not None:
+            if n_nogo_sj > 1:
+                nogo_sem = (nogo_arr.std(0) / np.sqrt(n_nogo_sj)).tolist()
+            else:
+                nogo_sem = slot.get("nogo_sem_fallback")
+
         agg["erp_by_cell"][cell] = {
             "times_ms": slot["times_ms"],
             "go": go_arr.mean(0).tolist() if go_arr is not None else None,
-            "go_sem": (go_arr.std(0) / np.sqrt(n_go_sj)).tolist() if go_arr is not None and n_go_sj > 1 else None,
+            "go_sem": go_sem,
             "nogo": nogo_arr.mean(0).tolist() if nogo_arr is not None else None,
-            "nogo_sem": (nogo_arr.std(0) / np.sqrt(n_nogo_sj)).tolist() if nogo_arr is not None and n_nogo_sj > 1 else None,
+            "nogo_sem": nogo_sem,
             "n_go": slot["n_go"],
             "n_nogo": slot["n_nogo"],
         }
@@ -684,7 +705,7 @@ with tab_run:
                 _eeg_run_dir = os.path.join(RUNS_ROOT, f"{_date}_{_run_name}")
             except Exception:
                 pass
-            _run_pipeline_with_progress(cmd, "EEG/ET pipeline", _eeg_run_dir, 1800)
+            _run_pipeline_with_progress(cmd, "EEG/ET pipeline", _eeg_run_dir, 14400)
 
         if run_overview and not st.session_state.pipeline_running:
             cmd = [VENV_PYTHON, os.path.join(PROJECT_ROOT, "src", "main.py"),
@@ -701,7 +722,7 @@ with tab_run:
                 _ov_run_dir = os.path.join(RUNS_ROOT, f"{_date}_{_run_name}")
             except Exception:
                 pass
-            _run_pipeline_with_progress(cmd, "Overview pipeline", _ov_run_dir, 1200)
+            _run_pipeline_with_progress(cmd, "Overview pipeline", _ov_run_dir, 14400)
 
         if st.session_state.pipeline_log:
             with st.expander("Pipeline Output", expanded=True):
