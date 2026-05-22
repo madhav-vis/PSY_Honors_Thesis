@@ -1,8 +1,8 @@
-run_name: "aLL_sj_test_run"
+run_name: "sj_17_test"
 date: "auto"
 data:
   root: "C:/Users/twbul/OneDrive/Desktop/Subjects_Walking_Outdoors"
-  subjects: [4,5]
+  subjects: [17]
   world_video_dir:  "C:/Users/twbul/OneDrive/Desktop/Subjects_Walking_Outdoors/worldvideos"
 
 eeg:

@@ -22,6 +22,7 @@ from vision.config import (
     CATEGORIES,
     CROP_SIZE,
     MIN_FIXATION_MS,
+    VISION_CONDITIONS,
     get_eye_dir,
     get_vision_out_dir,
     get_world_video_path,
@@ -85,12 +86,12 @@ def _load_run_config(run_dir):
 
 
 def _conditions_from_run_dir(run_dir):
-    """Read condition labels from run config."""
+    """Read vision condition labels from run config (walk-only by default)."""
     cfg = _load_run_config(run_dir)
-    conds = cfg.get("conditions", [])
-    labels = [c["eeg_label"] for c in conds
-              if isinstance(c, dict) and c.get("eeg_label")]
-    return labels or ["walk_attend", "walk_unattend"]
+    vis_conds = cfg.get("vision_conditions")
+    if isinstance(vis_conds, list) and vis_conds:
+        return vis_conds
+    return VISION_CONDITIONS
 
 
 def _subjects_from_run_dir(run_dir):
