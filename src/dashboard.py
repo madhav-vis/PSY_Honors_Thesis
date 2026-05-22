@@ -533,11 +533,12 @@ st.title("Mobile EEG + Eyetracking Pipeline")
 
 # ── Tabs ─────────────────────────────────────────────────────
 
-tab_run, tab_overview, tab_et, tab_nogo = st.tabs([
+tab_run, tab_overview, tab_et, tab_nogo, tab_eval = st.tabs([
     "Run Manager",
     "Overview",
     "Eye Tracking",
     "EEGNet",
+    "Evaluation",
 ])
 
 
@@ -2110,3 +2111,353 @@ with tab_nogo:
                             f"**Wilcoxon p:** {comp['p_value']:.4f} "
                             f"({'Significant' if comp.get('significant') else 'Not significant'})"
                         )
+
+
+# ════════════════════════════════════════════════════════════
+# ██  EVALUATION TAB
+# ════════════════════════════════════════════════════════════
+
+with tab_eval:
+    st.header("Model Evaluation")
+    st.caption("Vision pipeline comparison & EEG LOSO cross-validation")
+
+    EVAL_RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
+
+    # ── Cached results loader ───────────────────────────────
+    def _load_cached_vision():
+        p = os.path.join(EVAL_RESULTS_DIR, "vision_comparison.json")
+        if os.path.exists(p):
+            with open(p) as f:
+                return json.load(f)
+        return None
+
+    def _load_cached_eeg():
+        p = os.path.join(EVAL_RESULTS_DIR, "eeg_loso_comparison.json")
+        if os.path.exists(p):
+            with open(p) as f:
+                return json.load(f)
+        return None
+
+    # ── Controls ────────────────────────────────────────────
+    ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([1, 1, 1])
+    with ctrl_c1:
+        run_vision = st.checkbox("Vision Comparison", value=True)
+    with ctrl_c2:
+        run_eeg = st.checkbox("EEG LOSO Comparison", value=True)
+    with ctrl_c3:
+        n_repeats = st.number_input("CV repeats (vision)", min_value=1,
+                                    max_value=20, value=5, step=1)
+
+    run_eval = st.button("Run Evaluation", type="primary",
+                         use_container_width=True)
+
+    if run_eval:
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+        import evaluate as eval_mod
+
+        progress_bar = st.progress(0.0)
+        status_text = st.empty()
+
+        def _progress_cb(step, total, msg):
+            progress_bar.progress(min(step / max(total, 1), 1.0))
+            status_text.text(f"Step {step}/{total}: {msg}")
+
+        with st.spinner("Running evaluation..."):
+            res = eval_mod.run_full_evaluation(
+                vision=run_vision, eeg=run_eeg,
+                n_repeats=n_repeats, progress_cb=_progress_cb,
+            )
+
+        progress_bar.progress(1.0)
+        status_text.text("Done!")
+
+        if run_vision and "vision" in res:
+            st.session_state["eval_vision"] = res["vision"]
+        if run_eeg and "eeg" in res:
+            st.session_state["eval_eeg"] = res["eeg"]
+
+    # ── Load from cache / session ───────────────────────────
+    vision_result = st.session_state.get("eval_vision") or _load_cached_vision()
+    eeg_result = st.session_state.get("eval_eeg") or _load_cached_eeg()
+
+    # ═══════════════════════════════════════════════════
+    #  VISION RESULTS
+    # ═══════════════════════════════════════════════════
+
+    if vision_result and "summary" in vision_result and "error" not in vision_result:
+        st.subheader("Vision Pipeline Comparison")
+
+        summary = vision_result["summary"]
+        label_names = vision_result.get("label_names", [])
+        best_model = summary.get("best_model")
+
+        model_display = {
+            "clip_zeroshot": "Zero-shot CLIP",
+            "clip_head": "Trained CLIP Head",
+            "resnet50": "Fine-tuned ResNet-50",
+        }
+
+        if best_model:
+            st.success(f"Best model (by Macro F1): **{model_display.get(best_model, best_model)}** "
+                       f"— Macro F1 = {summary[best_model]['macro_f1_mean']:.3f} "
+                       f"± {summary[best_model]['macro_f1_std']:.3f}")
+
+        # Comparison table
+        comp_rows = []
+        for key in ["clip_zeroshot", "clip_head", "resnet50"]:
+            s = summary.get(key)
+            if not s:
+                continue
+            comp_rows.append({
+                "Method": model_display.get(key, key),
+                "Macro R": f"{s['macro_recall_mean']:.3f} ± {s['macro_recall_std']:.3f}",
+                "Macro P": f"{s['macro_precision_mean']:.3f} ± {s['macro_precision_std']:.3f}",
+                "Macro F1": f"{s['macro_f1_mean']:.3f} ± {s['macro_f1_std']:.3f}",
+                "Weighted F1": f"{s['weighted_f1_mean']:.3f} ± {s['weighted_f1_std']:.3f}",
+                "Accuracy": f"{s['accuracy_mean']:.3f} ± {s['accuracy_std']:.3f}",
+            })
+        if comp_rows:
+            st.dataframe(pd.DataFrame(comp_rows), use_container_width=True,
+                         hide_index=True)
+
+        # Label distribution
+        label_dist = vision_result.get("label_dist")
+        if label_dist:
+            with st.expander("Label distribution"):
+                dist_df = pd.DataFrame([
+                    {"Category": k, "Count": v}
+                    for k, v in label_dist.items()
+                ])
+                st.dataframe(dist_df, hide_index=True)
+
+        # Confusion matrices side by side
+        st.markdown("#### Confusion Matrices (aggregate)")
+        cm_models = [k for k in ["clip_zeroshot", "clip_head", "resnet50"]
+                     if k in summary and "confusion_matrix" in summary[k]]
+        if cm_models and label_names:
+            sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+            import evaluate as eval_mod
+
+            cols = st.columns(len(cm_models))
+            for i, mk in enumerate(cm_models):
+                with cols[i]:
+                    fig = eval_mod.make_cm_figure(
+                        summary[mk]["confusion_matrix"],
+                        label_names,
+                        title=model_display.get(mk, mk),
+                    )
+                    st.pyplot(fig, use_container_width=True)
+                    plt.close(fig)
+
+        # Relabel button
+        if best_model:
+            st.markdown("---")
+            st.markdown("#### Relabel All Crops with Best Model")
+            st.info(f"This will classify all gaze crops using "
+                    f"**{model_display.get(best_model, best_model)}** and "
+                    f"regenerate fusion features for the EEG pipeline.")
+
+            if st.button("Relabel All Crops", type="secondary"):
+                sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+                import evaluate as eval_mod
+
+                relabel_bar = st.progress(0.0)
+                relabel_status = st.empty()
+
+                def _relabel_cb(step, total, msg):
+                    relabel_bar.progress(min(step / max(total, 1), 1.0))
+                    relabel_status.text(f"{msg} ({step}/{total})")
+
+                with st.spinner("Relabeling crops..."):
+                    relabel_res = eval_mod.relabel_crops_with_best(
+                        best_model, progress_cb=_relabel_cb,
+                    )
+
+                relabel_bar.progress(1.0)
+                if relabel_res.get("error"):
+                    st.error(f"Relabeling failed: {relabel_res['error']}")
+                else:
+                    n_relabeled = relabel_res.get("n_crops_relabeled", 0)
+                    st.success(f"Relabeled {n_relabeled} crops. "
+                               f"Fusion CSV regenerated.")
+                    cats = relabel_res.get("category_counts", {})
+                    if cats:
+                        st.dataframe(
+                            pd.DataFrame([{"Category": k, "Count": v}
+                                          for k, v in cats.items()]),
+                            hide_index=True,
+                        )
+
+        # LaTeX export
+        with st.expander("LaTeX source (vision)"):
+            tex_path = os.path.join(EVAL_RESULTS_DIR,
+                                    "table_vision_comparison.tex")
+            if os.path.exists(tex_path):
+                with open(tex_path) as f:
+                    st.code(f.read(), language="latex")
+            else:
+                st.caption("Run evaluation to generate LaTeX.")
+
+        # Download buttons
+        dl_c1, dl_c2, dl_c3 = st.columns(3)
+        csv_path = os.path.join(EVAL_RESULTS_DIR,
+                                "table_vision_comparison.csv")
+        if os.path.exists(csv_path):
+            with open(csv_path) as f:
+                dl_c1.download_button("Download CSV", f.read(),
+                                      "vision_comparison.csv", "text/csv")
+        tex_path = os.path.join(EVAL_RESULTS_DIR,
+                                "table_vision_comparison.tex")
+        if os.path.exists(tex_path):
+            with open(tex_path) as f:
+                dl_c2.download_button("Download LaTeX", f.read(),
+                                      "vision_comparison.tex", "text/plain")
+        png_path = os.path.join(EVAL_RESULTS_DIR,
+                                "cm_vision_comparison.png")
+        if os.path.exists(png_path):
+            with open(png_path, "rb") as f:
+                dl_c3.download_button("Download CM (PNG)", f.read(),
+                                      "cm_vision_comparison.png", "image/png")
+
+    elif vision_result and vision_result.get("error"):
+        st.warning(f"Vision evaluation error: {vision_result['error']}")
+
+    # ═══════════════════════════════════════════════════
+    #  EEG LOSO RESULTS
+    # ═══════════════════════════════════════════════════
+
+    if eeg_result and "summary" in eeg_result and "error" not in eeg_result:
+        st.subheader("EEG LOSO Cross-Validation")
+
+        eeg_summary = eeg_result["summary"]
+        eeg_model_display = {
+            "eeg_only": "EEGNet (EEG-only)",
+            "multimodal": "MultimodalNet (EEG+ET)",
+        }
+
+        # Summary metrics as metric cards
+        met_cols = st.columns(len(eeg_summary))
+        for i, (mkey, s) in enumerate(eeg_summary.items()):
+            with met_cols[i]:
+                st.metric(
+                    label=eeg_model_display.get(mkey, mkey),
+                    value=f"F1 = {s['f1_mean']:.3f}",
+                    delta=f"AUC {s['auc_roc_mean']:.3f} | "
+                          f"Bal.Acc {s['balanced_accuracy_mean']:.3f}",
+                )
+
+        # Comparison table
+        eeg_rows = []
+        for key in ["eeg_only", "multimodal"]:
+            s = eeg_summary.get(key)
+            if not s:
+                continue
+            eeg_rows.append({
+                "Method": eeg_model_display.get(key, key),
+                "Bal. Acc": f"{s['balanced_accuracy_mean']:.3f} ± {s['balanced_accuracy_std']:.3f}",
+                "AUC-ROC": f"{s['auc_roc_mean']:.3f} ± {s['auc_roc_std']:.3f}",
+                "F1": f"{s['f1_mean']:.3f} ± {s['f1_std']:.3f}",
+                "Precision": f"{s['precision_mean']:.3f} ± {s['precision_std']:.3f}",
+                "Recall": f"{s['recall_mean']:.3f} ± {s['recall_std']:.3f}",
+            })
+        if eeg_rows:
+            st.dataframe(pd.DataFrame(eeg_rows), use_container_width=True,
+                         hide_index=True)
+
+        # Per-fold table
+        fold_data = eeg_result.get("fold_results", {})
+        fold_rows = []
+        for mkey in ["eeg_only", "multimodal"]:
+            for fold in fold_data.get(mkey, []):
+                fold_rows.append({
+                    "Method": eeg_model_display.get(mkey, mkey),
+                    "Held-out Subject": fold.get("held_out_subject", "?"),
+                    "Bal. Acc": f"{fold['balanced_accuracy']:.3f}",
+                    "AUC-ROC": f"{fold['auc_roc']:.3f}",
+                    "F1": f"{fold['f1']:.3f}",
+                    "Precision": f"{fold['precision']:.3f}",
+                    "Recall": f"{fold['recall']:.3f}",
+                })
+        if fold_rows:
+            with st.expander("Per-fold results"):
+                st.dataframe(pd.DataFrame(fold_rows), hide_index=True,
+                             use_container_width=True)
+
+        # Per-fold bar chart
+        if fold_rows:
+            chart_data = []
+            for mkey in ["eeg_only", "multimodal"]:
+                for fold in fold_data.get(mkey, []):
+                    chart_data.append({
+                        "Model": eeg_model_display.get(mkey, mkey),
+                        "Subject": f"sj{fold.get('held_out_subject', '?'):02d}",
+                        "F1": fold["f1"],
+                        "AUC-ROC": fold["auc_roc"],
+                    })
+            if chart_data:
+                chart_df = pd.DataFrame(chart_data)
+                fig_bar = px.bar(
+                    chart_df, x="Subject", y="F1", color="Model",
+                    barmode="group",
+                    title="Per-fold F1 by held-out subject",
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+        # Confusion matrices
+        st.markdown("#### Confusion Matrices (aggregate)")
+        cm_keys = [k for k in ["eeg_only", "multimodal"]
+                   if k in eeg_summary and "confusion_matrix_sum" in eeg_summary[k]]
+        if cm_keys:
+            sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+            import evaluate as eval_mod
+
+            cm_cols = st.columns(len(cm_keys))
+            eeg_labels = ["CR", "FA"]
+            for i, mk in enumerate(cm_keys):
+                with cm_cols[i]:
+                    fig = eval_mod.make_cm_figure(
+                        eeg_summary[mk]["confusion_matrix_sum"],
+                        eeg_labels,
+                        title=eeg_model_display.get(mk, mk),
+                    )
+                    st.pyplot(fig, use_container_width=True)
+                    plt.close(fig)
+
+        # LaTeX export
+        with st.expander("LaTeX source (EEG)"):
+            tex_path = os.path.join(EVAL_RESULTS_DIR,
+                                    "table_eeg_comparison.tex")
+            if os.path.exists(tex_path):
+                with open(tex_path) as f:
+                    st.code(f.read(), language="latex")
+            else:
+                st.caption("Run evaluation to generate LaTeX.")
+
+        # Download buttons
+        dl_e1, dl_e2, dl_e3 = st.columns(3)
+        csv_path = os.path.join(EVAL_RESULTS_DIR,
+                                "table_eeg_comparison.csv")
+        if os.path.exists(csv_path):
+            with open(csv_path) as f:
+                dl_e1.download_button("Download CSV (EEG)", f.read(),
+                                      "eeg_loso_comparison.csv", "text/csv")
+        tex_path = os.path.join(EVAL_RESULTS_DIR,
+                                "table_eeg_comparison.tex")
+        if os.path.exists(tex_path):
+            with open(tex_path) as f:
+                dl_e2.download_button("Download LaTeX (EEG)", f.read(),
+                                      "eeg_loso_comparison.tex", "text/plain")
+        png_path = os.path.join(EVAL_RESULTS_DIR,
+                                "cm_eeg_comparison.png")
+        if os.path.exists(png_path):
+            with open(png_path, "rb") as f:
+                dl_e3.download_button("Download CM (PNG, EEG)", f.read(),
+                                      "cm_eeg_comparison.png", "image/png")
+
+    elif eeg_result and eeg_result.get("error"):
+        st.warning(f"EEG LOSO error: {eeg_result['error']}")
+
+    # ── No results yet ──────────────────────────────────────
+    if not vision_result and not eeg_result:
+        st.info("No evaluation results found. Click **Run Evaluation** above, "
+                "or run `python src/evaluate.py` from the terminal.")

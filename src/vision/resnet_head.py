@@ -55,12 +55,17 @@ def _get_transforms():
     global _TRAIN_TRANSFORMS, _VAL_TRANSFORMS
     if _TRAIN_TRANSFORMS is None:
         _TRAIN_TRANSFORMS = transforms.Compose([
+            transforms.RandomResizedCrop(224, scale=(0.7, 1.0)),
             transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+            transforms.RandomRotation(15),
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1),
+                                    scale=(0.9, 1.1)),
+            transforms.ColorJitter(brightness=0.3, contrast=0.3,
+                                   saturation=0.2, hue=0.05),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                  std=[0.229, 0.224, 0.225]),
+            transforms.RandomErasing(p=0.2),
         ])
         _VAL_TRANSFORMS = transforms.Compose([
             transforms.ToTensor(),
@@ -140,6 +145,7 @@ def train_resnet(
     batch_size: int = 32,
     device: Optional[torch.device] = None,
     progress_cb: Optional[Callable] = None,
+    loss_fn: Optional[nn.Module] = None,
 ):
     """Train ResNet-50 end-to-end on crop images.
 
@@ -184,10 +190,12 @@ def train_resnet(
 
     model = build_resnet50(n_classes).to(device)
 
-    # Class-weighted loss
-    weights = torch.tensor(1.0 / class_counts, dtype=torch.float32).to(device)
-    weights = weights / weights.sum() * n_classes
-    loss_fn = nn.CrossEntropyLoss(weight=weights)
+    if loss_fn is None:
+        weights = torch.tensor(1.0 / class_counts, dtype=torch.float32).to(device)
+        weights = weights / weights.sum() * n_classes
+        loss_fn = nn.CrossEntropyLoss(weight=weights)
+    else:
+        loss_fn = loss_fn.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)

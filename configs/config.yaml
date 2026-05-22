@@ -70,8 +70,8 @@ loso:
   enabled: true
   subjects: [3, 4]
   run_dirs:
-    3: "2026-04-27_1546_sj03_all_cond_test"
-    4: "2026-04-27_1216_sj04_walk_pilot"
+    3: "2026-05-01_1432_sj03_all_cond_test"
+    4: "2026-04-23_1613_sj04_walk_pilot"
 
 flags:
   run_generalization: false
