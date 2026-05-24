@@ -368,51 +368,20 @@ def _process_condition(sj_num, condition, run_dir, classifier, world_video_dir=N
     if os.path.exists(human_csv):
         human_labels_df = pd.read_csv(human_csv)
 
-    # ── PHASE 5B: Train Fine-Tuned Head ──
-    # Retrain if: no head yet, OR central label count grew since last training.
-    emb_base = os.path.join(vision_dir, f"sj{sj_num:02d}_{label}_embeddings")
-    central_labels = load_labels_for(sj_num, label)
-    n_central = len(central_labels)
-
-    head_is_stale = False
-    if os.path.exists(TRAINED_HEAD_PATH):
-        import torch as _torch
-        try:
-            _ckpt = _torch.load(TRAINED_HEAD_PATH, map_location="cpu", weights_only=True)
-            head_is_stale = n_central > _ckpt.get("stats", {}).get("n_samples", 0)
-        except Exception:
-            head_is_stale = True
-
-    should_train = (
-        n_central >= 10
-        and os.path.exists(f"{emb_base}.npy")
-        and (not os.path.exists(TRAINED_HEAD_PATH) or head_is_stale)
-    )
-
-    if should_train:
-        print("  Phase 5B — Training linear classification head from central store...")
-        from vision.train_head import train_from_label_store
-        train_from_label_store(
-            sj_num=sj_num,
-            condition=label,
-            embeddings_base=emb_base,
-            out_model_path=TRAINED_HEAD_PATH,
-        )
-        if os.path.exists(TRAINED_HEAD_PATH):
-            classifier.load_head(TRAINED_HEAD_PATH)
-    elif not classifier.has_head and os.path.exists(TRAINED_HEAD_PATH):
+    # ── Load pre-existing CLIP head for reclassification ──
+    if not classifier.has_head and os.path.exists(TRAINED_HEAD_PATH):
         classifier.load_head(TRAINED_HEAD_PATH)
 
     if classifier.has_head:
-            print("  Phase 5B — Reclassifying with newly trained head...")
-            batch_results = classifier.classify_batch(crops_rgb)
-            for i, res in enumerate(batch_results):
-                results_df.loc[i, "gaze_target_category"] = res["label"]
-                results_df.loc[i, "confidence"] = res["confidence"]
-                for cat_label, score in res["all_scores"].items():
-                    results_df.loc[i, f"score_{cat_label}"] = score
-            results_df.to_csv(results_csv, index=False)
-            print(f"    Reclassified {len(results_df)} fixations")
+        print("  Reclassifying with trained head...")
+        batch_results = classifier.classify_batch(crops_rgb)
+        for i, res in enumerate(batch_results):
+            results_df.loc[i, "gaze_target_category"] = res["label"]
+            results_df.loc[i, "confidence"] = res["confidence"]
+            for cat_label, score in res["all_scores"].items():
+                results_df.loc[i, f"score_{cat_label}"] = score
+        results_df.to_csv(results_csv, index=False)
+        print(f"    Reclassified {len(results_df)} fixations")
 
     # ── PHASE 6: Visualizations ──
     _run_visualizations(sj_num, label, results_df, human_labels_df,
@@ -732,6 +701,78 @@ def run(run_dir_override=None):
             print(f"  {s['condition']:20s}  fixations={s['n_fixations']:5d}  "
                   f"top3=[{s['top_3']}]  mean_conf={s['mean_conf']}  "
                   f"trials={s['n_trials_with_vision']}")
+
+    # ── Pooled CLIP Head Training (all subjects) ──
+    print(f"\n{'='*60}")
+    print("  CLIP Head Training (all subjects pooled)")
+    print(f"{'='*60}")
+
+    from vision.train_head import train_with_holdout, save_head, _load_labeled_embeddings
+    from vision.label_store import load_trainable_labels
+    import tempfile
+
+    trainable = load_trainable_labels()
+    if trainable.empty:
+        print("  No trainable labels found — skipping CLIP head training")
+    else:
+        label_names = list(CATEGORIES.keys())
+        X_all, y_all, sj_ids_all = [], [], []
+
+        for sj_num in run_subjects:
+            for condition in run_conditions:
+                emb_base = os.path.join(
+                    get_vision_out_dir(the_run_dir, sj_num, condition),
+                    f"sj{sj_num:02d}_{condition}_embeddings",
+                )
+                emb_npy = f"{emb_base}.npy"
+                emb_ids = f"{emb_base}_ids.csv"
+                if not os.path.exists(emb_npy) or not os.path.exists(emb_ids):
+                    continue
+
+                subset = trainable[
+                    (trainable["subject_id"] == sj_num)
+                    & (trainable["condition"] == condition)
+                ]
+                if subset.empty:
+                    continue
+
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".csv", delete=False
+                ) as tmp:
+                    tmp_path = tmp.name
+                    subset[["fixation_id", "human_label"]].to_csv(tmp_path, index=False)
+                try:
+                    X_sub, y_sub, _ = _load_labeled_embeddings(
+                        tmp_path, emb_npy, emb_ids
+                    )
+                except Exception as exc:
+                    print(f"    Skipping sj{sj_num:02d} {condition}: {exc}")
+                    continue
+                finally:
+                    os.unlink(tmp_path)
+
+                X_all.append(X_sub)
+                y_all.extend(y_sub)
+                sj_ids_all.extend([sj_num] * len(X_sub))
+
+        if X_all:
+            X_pooled = np.vstack(X_all)
+            y_pooled = np.array(y_all)
+            sj_arr = np.array(sj_ids_all)
+            n_unique_sj = len(set(sj_ids_all))
+
+            print(f"  Pooled {len(X_pooled)} labeled embeddings "
+                  f"from {n_unique_sj} subject(s)")
+
+            model, stats, split = train_with_holdout(
+                X_pooled, y_pooled, label_names,
+                subject_ids=sj_arr if n_unique_sj > 1 else None,
+                strategy="cross_subject" if n_unique_sj > 1 else "within_subject",
+            )
+            save_head(model, stats, TRAINED_HEAD_PATH)
+            print(f"  CLIP head saved → {TRAINED_HEAD_PATH}")
+        else:
+            print("  No labeled embeddings matched — skipping training")
 
     try:
         from pipeline_progress import write_progress, clear_progress
