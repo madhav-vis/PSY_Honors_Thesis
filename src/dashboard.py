@@ -790,6 +790,7 @@ with tab_overview:
                 for msg in erp_load_errors:
                     st.warning(msg)
 
+        _shared_y_range = None
         if any(c in erp_by_cell for c in cell_order):
             fig_grid = make_subplots(
                 rows=2, cols=2,
@@ -810,7 +811,7 @@ with tab_overview:
                         line=dict(color="#e74c3c", width=2),
                         showlegend=(cell == "Attend Sit"),
                     ), row=r, col=c)
-                    if item.get("nogo_sem") is not None:
+                    if aggregate_mode and item.get("nogo_sem") is not None:
                         sem = np.asarray(item["nogo_sem"])
                         fig_grid.add_trace(go.Scatter(
                             x=t + t[::-1],
@@ -826,7 +827,7 @@ with tab_overview:
                         line=dict(color="#2980b9", width=2),
                         showlegend=(cell == "Attend Sit"),
                     ), row=r, col=c)
-                    if item.get("go_sem") is not None:
+                    if aggregate_mode and item.get("go_sem") is not None:
                         sem = np.asarray(item["go_sem"])
                         fig_grid.add_trace(go.Scatter(
                             x=t + t[::-1],
@@ -842,12 +843,25 @@ with tab_overview:
             fig_grid.update_xaxes(title_text="Time (ms)", row=2, col=2)
             fig_grid.update_yaxes(title_text="Amplitude (µV)", row=1, col=1)
             fig_grid.update_yaxes(title_text="Amplitude (µV)", row=2, col=1)
+            _global_y_vals = []
+            for _item in erp_by_cell.values():
+                for _key in ("go", "nogo"):
+                    if _item.get(_key) is not None:
+                        _global_y_vals.extend(np.asarray(_item[_key]).tolist())
+            if _global_y_vals:
+                _y_pad = (max(_global_y_vals) - min(_global_y_vals)) * 0.1
+                _shared_y_range = [min(_global_y_vals) - _y_pad, max(_global_y_vals) + _y_pad]
+            else:
+                _shared_y_range = None
+
+            if _shared_y_range:
+                fig_grid.update_yaxes(range=_shared_y_range)
             fig_grid.update_layout(
                 height=620, template="plotly_white",
                 legend=dict(orientation="h", y=-0.08),
             )
             st.plotly_chart(fig_grid, use_container_width=True)
-            st.caption("Shaded band = P300 window (250–700 ms). Shaded ribbons = ± SEM. Dashed line = stimulus onset.")
+            st.caption("Shaded band = P300 window (250–700 ms). Shaded ribbons = ± SEM (aggregate mode only). Dashed line = stimulus onset.")
         else:
             st.info("No ERP data found. Run the full pipeline first (EEG preprocess → fusion → extract_features).")
 
@@ -860,6 +874,8 @@ with tab_overview:
             _erp_components = {}
 
         for _comp_name, _comp_cfg in _erp_components.items():
+            if _comp_name == "p300":
+                continue
             _comp_channels = _comp_cfg.get("channels", [])
             _comp_window = _comp_cfg.get("window", [0, 1])
             _win_ms = (_comp_window[0] * 1000, _comp_window[1] * 1000)
@@ -984,35 +1000,21 @@ with tab_overview:
                             if len(_ni):
                                 _nogo_d = _d[_ni]
                                 _mu = _nogo_d.mean(0)
-                                _sem = _nogo_d.std(0) / np.sqrt(len(_ni))
                                 _comp_fig.add_trace(go.Scatter(
                                     x=_times_ms, y=_mu.tolist(),
                                     mode="lines", name="NoGo",
                                     line=dict(color="#e74c3c", width=2),
                                     showlegend=(_cc_cell == "Attend Sit"),
                                 ), row=_cc_r, col=_cc_c)
-                                _comp_fig.add_trace(go.Scatter(
-                                    x=_times_ms + _times_ms[::-1],
-                                    y=(_mu + _sem).tolist() + (_mu - _sem)[::-1].tolist(),
-                                    fill="toself", fillcolor="rgba(231,76,60,0.12)",
-                                    line=dict(width=0), showlegend=False, hoverinfo="skip",
-                                ), row=_cc_r, col=_cc_c)
                                 _has_data = True
                             if len(_gi):
                                 _go_d = _d[_gi]
                                 _mu = _go_d.mean(0)
-                                _sem = _go_d.std(0) / np.sqrt(len(_gi))
                                 _comp_fig.add_trace(go.Scatter(
                                     x=_times_ms, y=_mu.tolist(),
                                     mode="lines", name="Go",
                                     line=dict(color="#2980b9", width=2),
                                     showlegend=(_cc_cell == "Attend Sit"),
-                                ), row=_cc_r, col=_cc_c)
-                                _comp_fig.add_trace(go.Scatter(
-                                    x=_times_ms + _times_ms[::-1],
-                                    y=(_mu + _sem).tolist() + (_mu - _sem)[::-1].tolist(),
-                                    fill="toself", fillcolor="rgba(41,128,185,0.12)",
-                                    line=dict(width=0), showlegend=False, hoverinfo="skip",
                                 ), row=_cc_r, col=_cc_c)
                                 _has_data = True
                         break
@@ -1029,6 +1031,8 @@ with tab_overview:
                     _comp_fig.update_xaxes(title_text="Time (ms)", row=2, col=2)
                     _comp_fig.update_yaxes(title_text="Amplitude (uV)", row=1, col=1)
                     _comp_fig.update_yaxes(title_text="Amplitude (uV)", row=2, col=1)
+                    if _shared_y_range:
+                        _comp_fig.update_yaxes(range=_shared_y_range)
                     _comp_fig.update_layout(
                         height=620, template="plotly_white",
                         legend=dict(orientation="h", y=-0.08),
