@@ -50,12 +50,8 @@ CATEGORIES = {
         "a wide angle fisheye view looking up at sky and clouds "
         "from a wearable camera"
     ),
-    "ocean": (
-        "ocean or sea water visible in the distance from a "
-        "first person walking perspective"
-    ),
     "water": (
-        "a lake, pond, or calm body of water seen from a "
+        "ocean, sea, lake, pond, or any body of water seen from a "
         "first person walking perspective"
     ),
     "people": (
@@ -78,13 +74,14 @@ CATEGORIES = {
 
 CATEGORY_COLORS = {
     "sky": "#87CEEB",
-    "ocean": "#1E90FF",
-    "water": "#4169E1",
+    "water": "#1E90FF",
     "people": "#FF6B6B",
     "vegetation": "#2E8B57",
     "trail_ground": "#CD853F",
     "other": "#A9A9A9",
 }
+
+LABEL_MERGE_MAP = {"ocean": "water"}
 
 # Map condition label → ordered list of candidate filename templates.
 # get_world_video_path() returns the first candidate that exists on disk.

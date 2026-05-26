@@ -30,7 +30,7 @@ _SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
-from vision.config import CATEGORIES
+from vision.config import CATEGORIES, LABEL_MERGE_MAP
 from vision.label_store import load_trainable_labels, load_labels_for, PROJECT_ROOT
 
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
@@ -44,6 +44,7 @@ def _load_labeled_embeddings(labels_csv, embeddings_npy, embeddings_ids_csv):
     Returns (embeddings array [N, 512], labels list [N], label_names list).
     """
     labels_df = pd.read_csv(labels_csv)
+    labels_df["human_label"] = labels_df["human_label"].replace(LABEL_MERGE_MAP)
     embs = np.load(embeddings_npy)
     ids_df = pd.read_csv(embeddings_ids_csv)
 

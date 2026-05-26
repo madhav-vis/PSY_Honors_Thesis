@@ -16,6 +16,8 @@ from datetime import datetime
 
 import pandas as pd
 
+from .config import LABEL_MERGE_MAP
+
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _SRC_DIR = os.path.dirname(_THIS_DIR)
 PROJECT_ROOT = os.path.dirname(_SRC_DIR)
@@ -60,7 +62,10 @@ def load_labels() -> pd.DataFrame:
     if os.path.exists(LABELS_CSV):
         df = pd.read_csv(LABELS_CSV)
         df["subject_id"] = df["subject_id"].astype(int)
-        return _ensure_schema(df)
+        df = _ensure_schema(df)
+        if LABEL_MERGE_MAP:
+            df["human_label"] = df["human_label"].replace(LABEL_MERGE_MAP)
+        return df
     return pd.DataFrame(columns=LABEL_COLUMNS)
 
 

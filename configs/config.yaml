@@ -34,7 +34,6 @@ eeg:
 
 clip_categories:
   - "sky"
-  - "ocean"
   - "water"
   - "people"
   - "vegetation"

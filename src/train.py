@@ -1059,7 +1059,7 @@ class NoGoFusionNet(nn.Module):
 # ═══════════════════════════════════════════════════════════
 
 CLIP_CATEGORIES = [
-    "sky", "ocean", "water", "people",
+    "sky", "water", "people",
     "vegetation", "trail_ground", "other",
 ]
 
@@ -1174,8 +1174,9 @@ def _load_clip_gaze_sequences(run_name, meta, conditions, pre_stim_ms=2000):
 
             mask = (ts >= tt - pre_s) & (ts < tt)
             if np.any(mask):
-                vals = vdf.loc[mask, lab_col].dropna()
-                cats.extend(vals.astype(str).tolist())
+                vals = vdf.loc[mask, lab_col].dropna().astype(str)
+                vals = vals.replace({"ocean": "water"})
+                cats.extend(vals.tolist())
         sequences.append(cats)
 
     n_with = sum(1 for s in sequences if len(s) > 0)

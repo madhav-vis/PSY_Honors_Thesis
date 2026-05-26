@@ -301,12 +301,7 @@ def _aggregate_vision_results(run_name, subjects_tuple, conds_tuple):
     return pd.concat(frames, ignore_index=True)
 
 
-_CAT_COLORS = {
-    "sky": "#87CEEB", "ocean": "#1E90FF",
-    "water": "#4169E1", "people": "#FF6B6B",
-    "vegetation": "#2E8B57", "trail_ground": "#CD853F",
-    "other": "#A9A9A9",
-}
+_CAT_COLORS = CATEGORY_COLORS
 
 
 # ── Sidebar ───────────────────────────────────────────────────

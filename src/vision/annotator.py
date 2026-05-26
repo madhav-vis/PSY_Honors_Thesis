@@ -11,12 +11,11 @@ from .config import CATEGORIES
 
 _KEY_MAP = {
     ord("1"): "sky",
-    ord("2"): "ocean",
-    ord("3"): "water",
-    ord("4"): "people",
-    ord("5"): "vegetation",
-    ord("6"): "trail_ground",
-    ord("7"): "other",
+    ord("2"): "water",
+    ord("3"): "people",
+    ord("4"): "vegetation",
+    ord("5"): "trail_ground",
+    ord("6"): "other",
 }
 
 
