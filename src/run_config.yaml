@@ -2,7 +2,7 @@ run_name: "sj_17_test"
 date: "auto"
 data:
   root: "C:/Users/twbul/OneDrive/Desktop/Subjects_Walking_Outdoors"
-  subjects: [7,9,14,17,19]
+  subjects: [17]
   world_video_dir:  "C:/Users/twbul/OneDrive/Desktop/Subjects_Walking_Outdoors/worldvideos"
 
 eeg:
@@ -14,7 +14,7 @@ eeg:
   detect_bad_channels: true
   apply_ica: false
   use_gedai: true
-  gedai_strength: "auto"    # "auto", "auto+" (conservative), "auto-" (aggressive), or a float
+  gedai_strength: "auto+"   # "auto", "auto+" (conservative), "auto-" (aggressive), or a float
   trigger_latency_offset: 36
   tmin: -0.2
   tmax: 1.0
