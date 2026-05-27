@@ -81,7 +81,9 @@ def load_correct_montage(raw):
     return raw
 
 
-def preprocess_eeg(sj_num, cond):
+def _preprocess_pre_gedai(sj_num, cond):
+    """Phase A: load Raw EEG, montage, resample, reference, filter, bad-channel
+    detection.  Returns a GEDAI-ready (raw, trial_data) pair, or (None, None)."""
     label = cond["eeg_label"]
     source_dir_eeg = os.path.join(DATA_DIR, f"sj{sj_num:02d}", "eeg")
     source_dir_trial = os.path.join(DATA_DIR, f"sj{sj_num:02d}", "beh")
@@ -114,9 +116,6 @@ def preprocess_eeg(sj_num, cond):
               f"{len(trial_data)} trials remain")
 
     # ── Load and prepare continuous EEG ──────────────────────────────
-    # Some subjects (sj05+ in this dataset) use a reversed token order in the
-    # filename, e.g. "attend_sit" instead of "sit_attend". Try the canonical
-    # name first, then fall back to the swapped variant before giving up.
     eeg_file = os.path.join(source_dir_eeg, f"sj{sj_num:02d}_{label}.vhdr")
     if not os.path.exists(eeg_file):
         swapped_label = "_".join(reversed(label.split("_")))
@@ -140,9 +139,6 @@ def preprocess_eeg(sj_num, cond):
         raw = raw.resample(SFREQ_TARGET)
 
     if USE_GEDAI:
-        # GEDAI's leadfield Gram matrix assumes average reference —
-        # mastoid ref here creates a catastrophic eigenvalue mismatch.
-        # Re-reference to mastoids after GEDAI instead.
         print("    Re-referencing to average (GEDAI leadfield requires avg ref)")
         raw.set_eeg_reference("average", ch_type="eeg")
     elif all(ch in raw.ch_names for ch in REF_CHANNELS):
@@ -173,91 +169,12 @@ def preprocess_eeg(sj_num, cond):
     else:
         print("    Bad-channel detection: disabled (eeg.detect_bad_channels=false)")
 
-    # ── Artifact removal: GEDAI or ICA ─────────────────────────────
-    if USE_GEDAI:
-        eeg_data = raw.get_data(picks="eeg")
-        print(f"    Pre-GEDAI data scale: mean={eeg_data.mean():.2e}, "
-              f"std={eeg_data.std():.2e} V")
-        del eeg_data
+    return raw, trial_data
 
-        from gedai_preprocess import apply_gedai
-        gedai_plot_dir = os.path.join(OUTPUT_PLOT_DIR, "gedai")
-        raw, _ = apply_gedai(
-            raw,
-            denoising_strength=GEDAI_STRENGTH,
-            output_plot_dir=gedai_plot_dir,
-            label=f"sj{sj_num:02d}_{label}",
-        )
-        print("    GEDAI: finished")
-    elif APPLY_ICA:
-        print("    ICA: fitting fastica (n_components=0.99 variance on EEG picks)...")
-        ica = mne.preprocessing.ICA(
-            n_components=0.99, method="fastica",
-            random_state=97, max_iter="auto",
-        )
-        ica.fit(raw, picks="eeg")
-        ica_component_indices = list(range(ica.n_components_))
-        if ica_component_indices:
-            print(f"    ICA: fit done — {ica.n_components_} components "
-                  f"(indices {ica_component_indices[0]}…{ica_component_indices[-1]})")
-        else:
-            print("    ICA: fit done — 0 components (unexpected)")
 
-        eog_channels = [ch for ch in ["Fp1", "Fp2", "AF3", "AF4"]
-                        if ch in raw.ch_names]
-        eog_indices = []
-        if eog_channels:
-            for eog_ch in eog_channels:
-                try:
-                    inds, _ = ica.find_bads_eog(raw, ch_name=eog_ch, verbose=False)
-                    eog_indices.extend(inds)
-                except Exception:
-                    pass
-            eog_indices = list(set(eog_indices))
-            if eog_indices:
-                print(f"    ICA: EOG-based candidates — "
-                      f"{len(eog_indices)} component(s): {sorted(eog_indices)}")
-                ica.exclude = eog_indices
-            else:
-                print("    ICA: find_bads_eog found no components to exclude")
-        else:
-            print("    ICA: no Fp1/Fp2/AF3/AF4 — skipping automatic EOG detection")
-
-        excluded = sorted(set(ica.exclude))
-        print(f"    ICA: ica.exclude = {excluded}")
-
-        ica_fif = os.path.join(OUTPUT_DATA_DIR, f"sj{sj_num:02d}_{label}_ica.fif")
-        ica.save(ica_fif, overwrite=True)
-        print(f"    ICA: saved solution → {ica_fif}")
-
-        ica_plot_dir = os.path.join(OUTPUT_PLOT_DIR, "ica")
-        os.makedirs(ica_plot_dir, exist_ok=True)
-        try:
-            import matplotlib.pyplot as plt
-            n_maps = min(ica.n_components_, 24)
-            if n_maps < 1:
-                raise ValueError("no ICA components to plot")
-            picks = ica_component_indices[:n_maps]
-            figs = ica.plot_components(inst=raw, picks=picks, show=False)
-            if not isinstance(figs, (list, tuple)):
-                figs = [figs]
-            for fi, fig in enumerate(figs):
-                comp_path = os.path.join(
-                    ica_plot_dir,
-                    f"sj{sj_num:02d}_{label}_ica_components_{fi}.png",
-                )
-                fig.savefig(comp_path, dpi=150, bbox_inches="tight")
-                plt.close(fig)
-            print(f"    ICA: saved topomaps ({n_maps} maps) → {ica_plot_dir}")
-        except Exception as exc:
-            print(f"    ICA: topomap export skipped — {exc}")
-
-        if excluded:
-            print(f"    ICA: projecting out {len(excluded)} component(s)")
-        raw = ica.apply(raw)
-        print("    ICA: apply(raw) finished")
-    else:
-        print("    Artifact removal: disabled (apply_ica=false, use_gedai=false)")
+def _postprocess_after_gedai(raw, trial_data, sj_num, cond):
+    """Phase B: mastoid re-reference, epoch, trial alignment, save."""
+    label = cond["eeg_label"]
 
     # ── Post-GEDAI re-reference to mastoids for analysis ────────────
     if USE_GEDAI and all(ch in raw.ch_names for ch in REF_CHANNELS):
@@ -344,6 +261,158 @@ def preprocess_eeg(sj_num, cond):
     return epochs, trial_data
 
 
+def _preprocess_subject_combined_gedai(sj_num, conditions):
+    """Preprocess all conditions, apply GEDAI once on the combined data,
+    then split back and epoch each condition independently."""
+    from gedai_preprocess import apply_gedai
+
+    pre_results = {}
+    for cond in conditions:
+        label = cond["eeg_label"]
+        print(f"  Pre-GEDAI preprocessing: {label}")
+        raw, trial_data = _preprocess_pre_gedai(sj_num, cond)
+        if raw is None:
+            print(f"    Skipping {label} (preprocessing failed)")
+            continue
+        pre_results[label] = (raw, trial_data)
+
+    if not pre_results:
+        print(f"  No conditions preprocessed for sj{sj_num:02d} — skipping")
+        return
+
+    # ── Concatenate all conditions ───────────────────────────────────
+    boundaries = {}
+    raws_to_concat = []
+    cumulative = 0
+    for cond in conditions:
+        label = cond["eeg_label"]
+        if label not in pre_results:
+            continue
+        raw = pre_results[label][0]
+        n_samples = raw.n_times
+        boundaries[label] = (cumulative, cumulative + n_samples)
+        cumulative += n_samples
+        raws_to_concat.append(raw)
+
+    print(f"  Concatenating {len(raws_to_concat)} conditions "
+          f"({cumulative} total samples) for combined GEDAI")
+    combined_raw = mne.concatenate_raws(raws_to_concat)
+
+    eeg_data = combined_raw.get_data(picks="eeg")
+    print(f"  Pre-GEDAI combined data scale: mean={eeg_data.mean():.2e}, "
+          f"std={eeg_data.std():.2e} V")
+    del eeg_data
+
+    gedai_plot_dir = os.path.join(OUTPUT_PLOT_DIR, "gedai")
+    combined_raw, _ = apply_gedai(
+        combined_raw,
+        denoising_strength=GEDAI_STRENGTH,
+        output_plot_dir=gedai_plot_dir,
+        label=f"sj{sj_num:02d}_combined",
+    )
+    print("  Combined GEDAI: finished")
+
+    # ── Split back and epoch each condition ──────────────────────────
+    sfreq = combined_raw.info["sfreq"]
+    for cond in conditions:
+        label = cond["eeg_label"]
+        if label not in boundaries:
+            continue
+        start, end = boundaries[label]
+        tmin_crop = start / sfreq
+        tmax_crop = (end - 1) / sfreq
+        print(f"  Post-GEDAI processing: {label} "
+              f"(samples {start}–{end}, t={tmin_crop:.1f}–{tmax_crop:.1f}s)")
+        raw_cond = combined_raw.copy().crop(tmin=tmin_crop, tmax=tmax_crop)
+        trial_data = pre_results[label][1]
+        _postprocess_after_gedai(raw_cond, trial_data, sj_num, cond)
+        del raw_cond
+        gc.collect()
+
+    del combined_raw
+    gc.collect()
+
+
+def preprocess_eeg(sj_num, cond):
+    """Non-GEDAI preprocessing path (ICA or no artifact removal)."""
+    label = cond["eeg_label"]
+    raw, trial_data = _preprocess_pre_gedai(sj_num, cond)
+    if raw is None:
+        return None, None
+
+    if APPLY_ICA:
+        print("    ICA: fitting fastica (n_components=0.99 variance on EEG picks)...")
+        ica = mne.preprocessing.ICA(
+            n_components=0.99, method="fastica",
+            random_state=97, max_iter="auto",
+        )
+        ica.fit(raw, picks="eeg")
+        ica_component_indices = list(range(ica.n_components_))
+        if ica_component_indices:
+            print(f"    ICA: fit done — {ica.n_components_} components "
+                  f"(indices {ica_component_indices[0]}…{ica_component_indices[-1]})")
+        else:
+            print("    ICA: fit done — 0 components (unexpected)")
+
+        eog_channels = [ch for ch in ["Fp1", "Fp2", "AF3", "AF4"]
+                        if ch in raw.ch_names]
+        eog_indices = []
+        if eog_channels:
+            for eog_ch in eog_channels:
+                try:
+                    inds, _ = ica.find_bads_eog(raw, ch_name=eog_ch, verbose=False)
+                    eog_indices.extend(inds)
+                except Exception:
+                    pass
+            eog_indices = list(set(eog_indices))
+            if eog_indices:
+                print(f"    ICA: EOG-based candidates — "
+                      f"{len(eog_indices)} component(s): {sorted(eog_indices)}")
+                ica.exclude = eog_indices
+            else:
+                print("    ICA: find_bads_eog found no components to exclude")
+        else:
+            print("    ICA: no Fp1/Fp2/AF3/AF4 — skipping automatic EOG detection")
+
+        excluded = sorted(set(ica.exclude))
+        print(f"    ICA: ica.exclude = {excluded}")
+
+        ica_fif = os.path.join(OUTPUT_DATA_DIR, f"sj{sj_num:02d}_{label}_ica.fif")
+        ica.save(ica_fif, overwrite=True)
+        print(f"    ICA: saved solution → {ica_fif}")
+
+        ica_plot_dir = os.path.join(OUTPUT_PLOT_DIR, "ica")
+        os.makedirs(ica_plot_dir, exist_ok=True)
+        try:
+            import matplotlib.pyplot as plt
+            n_maps = min(ica.n_components_, 24)
+            if n_maps < 1:
+                raise ValueError("no ICA components to plot")
+            picks = ica_component_indices[:n_maps]
+            figs = ica.plot_components(inst=raw, picks=picks, show=False)
+            if not isinstance(figs, (list, tuple)):
+                figs = [figs]
+            for fi, fig in enumerate(figs):
+                comp_path = os.path.join(
+                    ica_plot_dir,
+                    f"sj{sj_num:02d}_{label}_ica_components_{fi}.png",
+                )
+                fig.savefig(comp_path, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+            print(f"    ICA: saved topomaps ({n_maps} maps) → {ica_plot_dir}")
+        except Exception as exc:
+            print(f"    ICA: topomap export skipped — {exc}")
+
+        if excluded:
+            print(f"    ICA: projecting out {len(excluded)} component(s)")
+        raw = ica.apply(raw)
+        print("    ICA: apply(raw) finished")
+    else:
+        print("    Artifact removal: disabled (apply_ica=false, use_gedai=false)")
+
+    return _postprocess_after_gedai(raw, trial_data, sj_num, cond)
+
+
 def align_to_eeg_events(df, eeg_event_list, idx_col="trialIdx"):
     import numpy as np
 
@@ -399,10 +468,13 @@ def run():
     for sj_num in SUBJECTS:
         print(f"\nProcessing Subject {sj_num}...")
         clear_cached_epochs(sj_num, CONDITIONS)
-        for cond in CONDITIONS:
-            print(f"  Processing condition: {cond['eeg_label']}")
-            preprocess_eeg(sj_num, cond)
-            gc.collect()
+        if USE_GEDAI:
+            _preprocess_subject_combined_gedai(sj_num, CONDITIONS)
+        else:
+            for cond in CONDITIONS:
+                print(f"  Processing condition: {cond['eeg_label']}")
+                preprocess_eeg(sj_num, cond)
+                gc.collect()
     print("\nEEG preprocessing complete!")
 
 

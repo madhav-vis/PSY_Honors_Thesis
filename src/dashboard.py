@@ -516,6 +516,148 @@ def _plot_sit_walk_behavior_matplotlib(beh_df):
     return fig
 
 
+# ── Additional Analysis helpers ──────────────────────────────
+
+@st.cache_data(ttl=120)
+def _load_trial_scene_labels(rn, sj, cond):
+    """Map trialIdx → gaze_scene using per-fixation vision results.
+
+    Returns a dict {trialIdx: gaze_scene} or None if vision data missing.
+    """
+    vis_dir = vision_dir(rn, sj, cond)
+    results_path = os.path.join(vis_dir, f"sj{sj:02d}_{cond}_vision_results.csv")
+    if not os.path.exists(results_path):
+        return None
+
+    results_df = pd.read_csv(results_path)
+    if "gaze_target_category" not in results_df.columns:
+        return None
+    if "timestamp_s" not in results_df.columns:
+        return None
+
+    feat_path = os.path.join(data_dir(rn), f"sj{sj:02d}_{cond}_features.csv")
+    if not os.path.exists(feat_path):
+        return None
+    feat_df = pd.read_csv(feat_path)
+    if "trigger_time" not in feat_df.columns or "trialIdx" not in feat_df.columns:
+        return None
+
+    scene_map = {}
+    for _, row in feat_df.iterrows():
+        t_time = row["trigger_time"]
+        if pd.isna(t_time):
+            continue
+        window = results_df[
+            (results_df["timestamp_s"] >= t_time - 1.0)
+            & (results_df["timestamp_s"] <= t_time + 1.0)
+        ]
+        if window.empty:
+            continue
+        counts = window["gaze_target_category"].value_counts()
+        scene_map[int(row["trialIdx"])] = counts.index[0]
+
+    return scene_map if scene_map else None
+
+
+@st.cache_data(ttl=120)
+def _build_analysis_df(rn, subjects_tuple, conds_tuple):
+    """Stack features across subjects/conditions with movement/attention/gaze_scene."""
+    frames = []
+    for sj in subjects_tuple:
+        for cond in conds_tuple:
+            feat_path = os.path.join(data_dir(rn), f"sj{sj:02d}_{cond}_features.csv")
+            if not os.path.exists(feat_path):
+                continue
+            df = pd.read_csv(feat_path)
+            df["subject"] = sj
+            df["condition"] = cond
+            low = cond.lower()
+            df["movement"] = "Walk" if "walk" in low else "Sit"
+            df["attention"] = (
+                "Attend" if "attend" in low and "unattend" not in low
+                else "Unattend"
+            )
+            scene_map = _load_trial_scene_labels(rn, sj, cond)
+            if scene_map and "trialIdx" in df.columns:
+                df["gaze_scene"] = df["trialIdx"].map(scene_map)
+            else:
+                df["gaze_scene"] = np.nan
+            frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def _plot_alpha_by_category(df, group_col, group_order=None, title_prefix=""):
+    """Bar chart of alpha power (frontal/parietal/occipital) grouped by a category column."""
+    regions = [
+        ("alpha_frontal_uV2", "Frontal"),
+        ("alpha_parietal_uV2", "Parietal"),
+        ("alpha_occipital_uV2", "Occipital"),
+    ]
+    available = [(col, lbl) for col, lbl in regions if col in df.columns]
+    if not available:
+        return None
+
+    groups = group_order or sorted(df[group_col].dropna().unique())
+    if len(groups) == 0:
+        return None
+
+    fig, axes = plt.subplots(1, len(available), figsize=(4.5 * len(available), 4.5),
+                             constrained_layout=True)
+    if len(available) == 1:
+        axes = [axes]
+
+    bar_colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+                  "#9467bd", "#8c564b", "#e377c2"]
+
+    for ax, (col, region_label) in zip(axes, available):
+        means, sems = [], []
+        for g in groups:
+            vals = df.loc[df[group_col] == g, col].dropna()
+            means.append(vals.mean() if len(vals) else np.nan)
+            sems.append(vals.sem() if len(vals) > 1 else 0.0)
+
+        x = np.arange(len(groups))
+        colors = [bar_colors[i % len(bar_colors)] for i in range(len(groups))]
+        ax.bar(x, means, yerr=sems, color=colors, width=0.6,
+               error_kw={"capsize": 5, "elinewidth": 1.5})
+        ax.set_xticks(x, groups, rotation=30, ha="right")
+        ax.set_ylabel("Alpha Power (uV^2)")
+        ax.set_title(f"{title_prefix}{region_label} Alpha")
+        ax.grid(axis="y", alpha=0.25)
+
+    return fig
+
+
+def _plot_p300_by_scene_freq(df):
+    """Bar chart of P300 amplitude for frequent vs infrequent gaze scenes."""
+    p300_col = "P300_cluster_uV" if "P300_cluster_uV" in df.columns else "P300_Pz_uV"
+    if p300_col not in df.columns or "scene_freq" not in df.columns:
+        return None
+
+    groups = ["Frequent", "Infrequent"]
+    means, sems, ns = [], [], []
+    for g in groups:
+        vals = df.loc[df["scene_freq"] == g, p300_col].dropna()
+        means.append(vals.mean() if len(vals) else np.nan)
+        sems.append(vals.sem() if len(vals) > 1 else 0.0)
+        ns.append(len(vals))
+
+    fig, ax = plt.subplots(figsize=(5, 4.5), constrained_layout=True)
+    x = np.arange(len(groups))
+    colors = ["#2ca02c", "#d62728"]
+    bars = ax.bar(x, means, yerr=sems, color=colors, width=0.5,
+                  error_kw={"capsize": 6, "elinewidth": 1.5})
+    ax.set_xticks(x, [f"{g}\n(n={n})" for g, n in zip(groups, ns)])
+    ax.set_ylabel("P300 Amplitude (uV)")
+    ax.set_title("P300: Frequent vs Infrequent Gaze Scenes")
+    ax.grid(axis="y", alpha=0.25)
+
+    return fig
+
+
 # ── Sidebar ──────────────────────────────────────────────────
 
 st.sidebar.header("Run History")
@@ -560,12 +702,13 @@ st.title("Mobile EEG + Eyetracking Pipeline")
 
 # ── Tabs ─────────────────────────────────────────────────────
 
-tab_run, tab_overview, tab_et, tab_nogo, tab_eval = st.tabs([
+tab_run, tab_overview, tab_et, tab_nogo, tab_eval, tab_analysis = st.tabs([
     "Run Manager",
     "Overview",
     "Eye Tracking",
     "EEGNet",
     "Evaluation",
+    "Additional Analysis",
 ])
 
 
@@ -2492,3 +2635,166 @@ with tab_eval:
     if not vision_result and not eeg_result:
         st.info("No evaluation results found. Click **Run Evaluation** above, "
                 "or run `python src/evaluate.py` from the terminal.")
+
+
+# ════════════════════════════════════════════════════════════
+# ██  ADDITIONAL ANALYSIS TAB
+# ════════════════════════════════════════════════════════════
+
+with tab_analysis:
+    if not selected_run:
+        st.info("Select a run from the sidebar.")
+    elif not subjects:
+        st.info("No subjects with preprocessed data in this run yet.")
+    else:
+        _an_mode = st.radio(
+            "View mode",
+            ["All subjects (average)", "Single subject"],
+            index=0, horizontal=True,
+            key="analysis_view_mode",
+        )
+        an_aggregate = _an_mode.startswith("All")
+        an_sj = None
+        if not an_aggregate:
+            an_sj = st.selectbox(
+                "Subject", subjects,
+                format_func=lambda x: f"sj{x:02d}",
+                key="analysis_subject",
+            )
+
+        an_subjects = tuple(subjects) if an_aggregate else (an_sj,)
+        an_conds = tuple(conditions)
+
+        analysis_df = _build_analysis_df(selected_run, an_subjects, an_conds)
+
+        if analysis_df.empty:
+            st.warning("No feature data found for the selected subject(s).")
+        else:
+            if an_aggregate:
+                st.header(f"Additional Analysis — All subjects (n={len(subjects)})")
+            else:
+                st.header(f"Additional Analysis — sj{an_sj:02d}")
+
+            # ── Section 1: Alpha Power by Gaze Scene ─────────────
+            st.subheader("Alpha Power by Gaze Scene")
+
+            scene_df = analysis_df.dropna(subset=["gaze_scene"])
+            if scene_df.empty:
+                st.info(
+                    "Vision features not available for this run. "
+                    "Run the CLIP vision pipeline first: "
+                    "`python src/vision/vision_main.py --run-dir runs/<run_name>`"
+                )
+            else:
+                n_scene_trials = len(scene_df)
+                n_scene_sj = scene_df["subject"].nunique()
+                st.caption(
+                    f"{n_scene_trials} trials with gaze scene labels "
+                    f"across {n_scene_sj} subject(s)"
+                )
+
+                scene_order = [s for s in
+                               ["trail_ground", "vegetation", "sky",
+                                "water", "ocean", "people", "other"]
+                               if s in scene_df["gaze_scene"].unique()]
+
+                fig_scene = _plot_alpha_by_category(
+                    scene_df, "gaze_scene", group_order=scene_order,
+                    title_prefix="By Scene: ")
+                if fig_scene:
+                    st.pyplot(fig_scene, use_container_width=True)
+                    plt.close(fig_scene)
+
+                # Alpha by attention condition (attend vs unattend)
+                st.markdown("**Alpha by Attention Condition**")
+                fig_attn = _plot_alpha_by_category(
+                    analysis_df, "attention",
+                    group_order=["Attend", "Unattend"],
+                    title_prefix="")
+                if fig_attn:
+                    st.pyplot(fig_attn, use_container_width=True)
+                    plt.close(fig_attn)
+
+            st.markdown("---")
+
+            # ── Section 2: Alpha Power — Walking vs Sitting ──────
+            st.subheader("Alpha Power: Walking vs Sitting")
+
+            fig_move = _plot_alpha_by_category(
+                analysis_df, "movement",
+                group_order=["Sit", "Walk"],
+                title_prefix="")
+            if fig_move:
+                st.pyplot(fig_move, use_container_width=True)
+                plt.close(fig_move)
+            else:
+                st.warning("Alpha power columns not found in feature data.")
+
+            st.markdown("---")
+
+            # ── Section 3: P300 and Infrequent Scenes ────────────
+            st.subheader("P300 and Infrequent Scenes")
+
+            if scene_df.empty:
+                st.info(
+                    "Vision features not available for this run. "
+                    "Run the CLIP vision pipeline first."
+                )
+            else:
+                FREQUENT_SCENES = {"trail_ground"}
+                INFREQUENT_SCENES = {"sky", "water", "ocean",
+                                     "people", "vegetation"}
+
+                p300_df = scene_df.copy()
+                p300_df["scene_freq"] = p300_df["gaze_scene"].apply(
+                    lambda s: "Frequent" if s in FREQUENT_SCENES
+                    else ("Infrequent" if s in INFREQUENT_SCENES else None)
+                )
+                p300_df = p300_df.dropna(subset=["scene_freq"])
+
+                if p300_df.empty:
+                    st.warning("No trials match frequent/infrequent classification.")
+                else:
+                    freq_n = int((p300_df["scene_freq"] == "Frequent").sum())
+                    infreq_n = int((p300_df["scene_freq"] == "Infrequent").sum())
+                    st.caption(
+                        f"Frequent (trail_ground): {freq_n} trials  |  "
+                        f"Infrequent (sky, water, ocean, people, vegetation): "
+                        f"{infreq_n} trials"
+                    )
+
+                    fig_p300 = _plot_p300_by_scene_freq(p300_df)
+                    if fig_p300:
+                        st.pyplot(fig_p300, use_container_width=True)
+                        plt.close(fig_p300)
+
+                    # Breakdown by individual infrequent category
+                    infreq_only = p300_df[p300_df["scene_freq"] == "Infrequent"]
+                    if len(infreq_only["gaze_scene"].unique()) > 1:
+                        st.markdown("**P300 by Individual Infrequent Category**")
+                        p300_col = ("P300_cluster_uV"
+                                    if "P300_cluster_uV" in infreq_only.columns
+                                    else "P300_Pz_uV")
+                        if p300_col in infreq_only.columns:
+                            cat_order = [c for c in
+                                         ["vegetation", "sky", "water",
+                                          "ocean", "people"]
+                                         if c in infreq_only["gaze_scene"].unique()]
+                            cat_means = []
+                            for c in cat_order:
+                                vals = infreq_only.loc[
+                                    infreq_only["gaze_scene"] == c, p300_col
+                                ].dropna()
+                                cat_means.append({
+                                    "Scene": c,
+                                    "Mean P300 (uV)": f"{vals.mean():.2f}"
+                                    if len(vals) else "N/A",
+                                    "SEM": f"{vals.sem():.2f}"
+                                    if len(vals) > 1 else "N/A",
+                                    "n": len(vals),
+                                })
+                            st.dataframe(
+                                pd.DataFrame(cat_means),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
