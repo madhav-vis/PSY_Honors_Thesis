@@ -139,7 +139,13 @@ def preprocess_eeg(sj_num, cond):
         print(f"    Downsampling from {raw.info['sfreq']:.1f} Hz to {SFREQ_TARGET} Hz")
         raw = raw.resample(SFREQ_TARGET)
 
-    if all(ch in raw.ch_names for ch in REF_CHANNELS):
+    if USE_GEDAI:
+        # GEDAI's leadfield Gram matrix assumes average reference —
+        # mastoid ref here creates a catastrophic eigenvalue mismatch.
+        # Re-reference to mastoids after GEDAI instead.
+        print("    Re-referencing to average (GEDAI leadfield requires avg ref)")
+        raw.set_eeg_reference("average", ch_type="eeg")
+    elif all(ch in raw.ch_names for ch in REF_CHANNELS):
         print(f"    Re-referencing to average of {REF_CHANNELS}")
         raw.set_eeg_reference(REF_CHANNELS, ch_type="eeg")
     else:
@@ -169,6 +175,11 @@ def preprocess_eeg(sj_num, cond):
 
     # ── Artifact removal: GEDAI or ICA ─────────────────────────────
     if USE_GEDAI:
+        eeg_data = raw.get_data(picks="eeg")
+        print(f"    Pre-GEDAI data scale: mean={eeg_data.mean():.2e}, "
+              f"std={eeg_data.std():.2e} V")
+        del eeg_data
+
         from gedai_preprocess import apply_gedai
         gedai_plot_dir = os.path.join(OUTPUT_PLOT_DIR, "gedai")
         raw, _ = apply_gedai(
@@ -248,6 +259,11 @@ def preprocess_eeg(sj_num, cond):
     else:
         print("    Artifact removal: disabled (apply_ica=false, use_gedai=false)")
 
+    # ── Post-GEDAI re-reference to mastoids for analysis ────────────
+    if USE_GEDAI and all(ch in raw.ch_names for ch in REF_CHANNELS):
+        print(f"    Re-referencing to {REF_CHANNELS} (post-GEDAI, for analysis)")
+        raw.set_eeg_reference(REF_CHANNELS, ch_type="eeg")
+
     # ── Epoching ─────────────────────────────────────────────────────
     events, event_id = mne.events_from_annotations(raw)
 
@@ -273,6 +289,12 @@ def preprocess_eeg(sj_num, cond):
     gc.collect()
     epochs.apply_baseline(baseline=BASELINE)
     print(f"    Created {len(epochs)} epochs")
+
+    if "Pz" in epochs.ch_names:
+        pz_data = epochs.get_data(picks=["Pz"]) * 1e6
+        peak = pz_data.mean(axis=0).squeeze()
+        print(f"    P300 sanity: Pz grand-avg peak={peak.max():.2f} µV "
+              f"(at {epochs.times[peak.argmax()]*1000:.0f} ms)")
 
     # ── Trial ↔ EEG alignment ───────────────────────────────────────
     eeg_event_list = epochs.events[:, 2]
