@@ -183,12 +183,31 @@ def train_resnet(
     sample_weights = [1.0 / class_counts[y] for y in y_train]
     sampler = WeightedRandomSampler(sample_weights, num_samples=len(y_train), replacement=True)
 
+    _pin = device.type == "cuda"
+    from device_utils import (
+        dataloader_workers as _dl_workers,
+        persistent_workers as _persistent,
+        prefetch_factor as _prefetch,
+        use_amp as _use_amp,
+        use_channels_last as _use_channels_last,
+        enable_cudnn_benchmark,
+        make_autocast, make_grad_scaler,
+    )
+    enable_cudnn_benchmark()
+    _nw = _dl_workers()
+    _pw = _persistent() and _nw > 0
+    _pf_kwargs = {"prefetch_factor": _prefetch()} if _nw > 0 else {}
     train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler,
-                              num_workers=0, pin_memory=False)
+                              num_workers=_nw, pin_memory=_pin,
+                              persistent_workers=_pw, **_pf_kwargs)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
-                            num_workers=0, pin_memory=False)
+                            num_workers=_nw, pin_memory=_pin,
+                            persistent_workers=_pw, **_pf_kwargs)
 
     model = build_resnet50(n_classes).to(device)
+    _channels_last = _use_channels_last()
+    if _channels_last:
+        model = model.to(memory_format=torch.channels_last)
 
     if loss_fn is None:
         weights = torch.tensor(1.0 / class_counts, dtype=torch.float32).to(device)
@@ -200,6 +219,18 @@ def train_resnet(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
 
+    amp_on = _use_amp()
+    scaler = make_grad_scaler(enabled=amp_on)
+    _perf_msg = []
+    if amp_on:
+        _perf_msg.append("AMP fp16")
+    if _channels_last:
+        _perf_msg.append("channels_last")
+    if _nw > 0:
+        _perf_msg.append(f"{_nw} workers x prefetch {_prefetch()}")
+    if _perf_msg:
+        print(f"  ResNet perf: {', '.join(_perf_msg)} on {device}")
+
     history = []
     best_val_acc = 0.0
     best_state = None
@@ -209,12 +240,17 @@ def train_resnet(
         model.train()
         train_loss = 0.0
         for imgs, labels in train_loader:
-            imgs, labels = imgs.to(device), labels.to(device)
-            optimizer.zero_grad()
-            logits = model(imgs)
-            loss = loss_fn(logits, labels)
-            loss.backward()
-            optimizer.step()
+            imgs = imgs.to(device, non_blocking=_pin)
+            if _channels_last:
+                imgs = imgs.to(memory_format=torch.channels_last)
+            labels = labels.to(device, non_blocking=_pin)
+            optimizer.zero_grad(set_to_none=True)
+            with make_autocast(device, enabled=amp_on):
+                logits = model(imgs)
+                loss = loss_fn(logits, labels)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             train_loss += loss.item() * len(imgs)
         train_loss /= max(len(train_ds), 1)
         scheduler.step()
@@ -225,9 +261,14 @@ def train_resnet(
         correct = 0
         with torch.no_grad():
             for imgs, labels in val_loader:
-                imgs, labels = imgs.to(device), labels.to(device)
-                logits = model(imgs)
-                val_loss += loss_fn(logits, labels).item() * len(imgs)
+                imgs = imgs.to(device, non_blocking=_pin)
+                if _channels_last:
+                    imgs = imgs.to(memory_format=torch.channels_last)
+                labels = labels.to(device, non_blocking=_pin)
+                with make_autocast(device, enabled=amp_on):
+                    logits = model(imgs)
+                    batch_loss = loss_fn(logits, labels)
+                val_loss += batch_loss.item() * len(imgs)
                 correct += (logits.argmax(1) == labels).sum().item()
         val_loss /= max(len(val_ds), 1)
         val_acc = correct / max(len(val_ds), 1)
@@ -246,21 +287,29 @@ def train_resnet(
         if progress_cb is not None:
             progress_cb(epoch + 1, n_epochs, metrics)
 
-    # Restore best checkpoint
+    # Restore best checkpoint (keep on device for the eval pass; move to CPU at the end)
     if best_state is not None:
         model.load_state_dict(best_state)
-    model = model.cpu()
+    model = model.to(device)
     model.eval()
 
     # Final classification report on validation set
     val_preds, val_true = [], []
     val_ds_plain = CropDataset(val_records, transform=val_tfm)
-    val_loader_plain = DataLoader(val_ds_plain, batch_size=batch_size, shuffle=False, num_workers=0)
+    val_loader_plain = DataLoader(val_ds_plain, batch_size=batch_size, shuffle=False,
+                                  num_workers=_nw, pin_memory=_pin,
+                                  persistent_workers=_pw, **_pf_kwargs)
     with torch.no_grad():
         for imgs, labels in val_loader_plain:
-            logits = model(imgs)
-            val_preds.extend(logits.argmax(1).numpy())
+            imgs = imgs.to(device, non_blocking=_pin)
+            if _channels_last:
+                imgs = imgs.to(memory_format=torch.channels_last)
+            with make_autocast(device, enabled=amp_on):
+                logits = model(imgs)
+            val_preds.extend(logits.argmax(1).cpu().numpy())
             val_true.extend(labels.numpy())
+
+    model = model.cpu()
 
     present = sorted(set(val_true))
     present_names = [label_names[c] for c in present]
@@ -391,36 +440,80 @@ def train_from_label_store(
         progress_cb=progress_cb,
     )
 
-    # Evaluate on test set
-    if test_records:
-        _, val_tfm = _get_transforms()
-        test_ds = CropDataset(test_records, transform=val_tfm)
-        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=0)
-        test_preds, test_true = [], []
-        with torch.no_grad():
-            for imgs, labels in test_loader:
-                logits = model(imgs)
-                test_preds.extend(logits.argmax(1).numpy())
-                test_true.extend(labels.numpy())
-        test_acc = sum(p == t for p, t in zip(test_preds, test_true)) / len(test_true)
-        present = sorted(set(test_true))
-        present_names = [label_names[c] for c in present]
-        stats["test_acc"] = round(test_acc, 4)
-        stats["test_classification_report"] = classification_report(
-            test_true, test_preds, labels=present, target_names=present_names,
-            output_dict=True, zero_division=0,
-        )
-        stats["test_confusion_matrix"] = confusion_matrix(
-            test_true, test_preds, labels=present
-        ).tolist()
-        stats["test_label_order"] = present_names
-
+    # Save the model FIRST so a crash in the test-eval step below can't
+    # destroy a successful training run. We save again after test eval
+    # (with test_acc etc. populated) if it completes.
     test_filenames = labels_df.iloc[test_idx]["filename"].tolist()
     test_true_labels = labels_df.iloc[test_idx]["human_label"].tolist()
-
     save_resnet(model, stats, out_path,
                 test_filenames=test_filenames, test_labels=test_true_labels)
-    print(f"  Saved ResNet checkpoint → {out_path}")
+    print(f"  Saved ResNet checkpoint (pre-test) -> {out_path}")
+
+    # Evaluate on test set. We deliberately use num_workers=0 here:
+    # - Training workers from train_resnet are gone, but launching 8 fresh
+    #   spawn-workers each re-imports torch/scipy/sklearn from scratch,
+    #   which can blow Windows commit-charge on large stacks.
+    # - The test pass is a single shot over a few hundred batches; CPU
+    #   image-decode is not the bottleneck once the model is on GPU.
+    if test_records:
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        from device_utils import (
+            get_device as _get_device,
+            use_amp as _use_amp_t,
+            use_channels_last as _channels_last_t,
+            make_autocast as _autocast_t,
+        )
+        _eval_device = _get_device()
+        _pin_eval = _eval_device.type == "cuda"
+        _amp_t = _use_amp_t()
+        _cl_t = _channels_last_t()
+        _, val_tfm = _get_transforms()
+        test_ds = CropDataset(test_records, transform=val_tfm)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
+                                 num_workers=0, pin_memory=_pin_eval)
+        model_eval = model.to(_eval_device)
+        if _cl_t:
+            model_eval = model_eval.to(memory_format=torch.channels_last)
+        model_eval.eval()
+        test_preds, test_true = [], []
+        try:
+            with torch.no_grad():
+                for imgs, labels in test_loader:
+                    imgs = imgs.to(_eval_device, non_blocking=_pin_eval)
+                    if _cl_t:
+                        imgs = imgs.to(memory_format=torch.channels_last)
+                    with _autocast_t(_eval_device, enabled=_amp_t):
+                        logits = model_eval(imgs)
+                    test_preds.extend(logits.argmax(1).cpu().numpy())
+                    test_true.extend(labels.numpy())
+            model = model_eval.cpu()
+            test_acc = sum(p == t for p, t in zip(test_preds, test_true)) / len(test_true)
+            present = sorted(set(test_true))
+            present_names = [label_names[c] for c in present]
+            stats["test_acc"] = round(test_acc, 4)
+            stats["test_classification_report"] = classification_report(
+                test_true, test_preds, labels=present, target_names=present_names,
+                output_dict=True, zero_division=0,
+            )
+            stats["test_confusion_matrix"] = confusion_matrix(
+                test_true, test_preds, labels=present
+            ).tolist()
+            stats["test_label_order"] = present_names
+
+            # Re-save with full test metrics. Training metrics are already
+            # safe on disk from the pre-test save.
+            save_resnet(model, stats, out_path,
+                        test_filenames=test_filenames, test_labels=test_true_labels)
+            print(f"  Updated ResNet checkpoint with test metrics -> {out_path}")
+        except Exception as e:
+            print(f"  WARNING: test-set evaluation failed ({type(e).__name__}: {e})")
+            print(f"  The trained model is still safely saved at {out_path}.")
+            print(f"  You can re-run test eval later from the Evaluate tab.")
+
     return stats
 
 
@@ -430,13 +523,35 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Train ResNet-50 on gaze crops")
-    parser.add_argument("--output", required=True, help="Output .pt path")
+    parser.add_argument(
+        "--output", default=None,
+        help="Output .pt path. If omitted, auto-saves to "
+             "models/resnet50_<timestamp>.pt (same naming as the Streamlit "
+             "Train tab). Use --versioned to force the timestamp suffix "
+             "even when --output is provided.",
+    )
+    parser.add_argument(
+        "--versioned", action="store_true",
+        help="Append a _YYYYMMDD_HHMMSS timestamp to the output filename so "
+             "successive runs don't overwrite each other.",
+    )
     parser.add_argument("--sj", type=int, default=None, help="Subject number (omit to pool all)")
     parser.add_argument("--condition", default=None, help="Condition (omit to pool all)")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--batch-size", type=int, default=32)
     args = parser.parse_args()
+
+    # Resolve output path: default-or-versioned both add a timestamp suffix
+    _stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if args.output is None:
+        out_path = os.path.join(MODELS_DIR, f"resnet50_{_stamp}.pt")
+    elif args.versioned:
+        base, ext = os.path.splitext(args.output)
+        out_path = f"{base}_{_stamp}{ext or '.pt'}"
+    else:
+        out_path = args.output
+    print(f"  Output checkpoint: {out_path}")
 
     def _cli_cb(epoch, n_epochs, metrics):
         print(f"  epoch {epoch:3d}/{n_epochs}  "
@@ -445,7 +560,7 @@ if __name__ == "__main__":
               f"val_acc={metrics['val_acc']:.3f}")
 
     stats = train_from_label_store(
-        out_path=args.output,
+        out_path=out_path,
         sj_num=args.sj,
         condition=args.condition,
         n_epochs=args.epochs,
@@ -456,3 +571,5 @@ if __name__ == "__main__":
     if stats:
         print(f"\nDone. Best val acc: {stats['best_val_acc']:.3f}  "
               f"Test acc: {stats.get('test_acc', 'N/A')}")
+        print(f"Open the Streamlit annotator's Evaluate tab to view this run "
+              f"({os.path.basename(out_path)}).")

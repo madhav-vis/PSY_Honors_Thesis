@@ -642,6 +642,11 @@ def run(run_dir_override=None):
     os.makedirs(the_run_dir, exist_ok=True)
 
     print(f"Vision run dir: {the_run_dir}")
+    try:
+        from device_utils import print_device_banner
+        print_device_banner(prefix="  ")
+    except ImportError:
+        pass
     print("Loading CLIP model...")
     head = TRAINED_HEAD_PATH if os.path.exists(TRAINED_HEAD_PATH) else None
     classifier = GazeClassifier(head_path=head)

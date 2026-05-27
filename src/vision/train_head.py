@@ -474,7 +474,7 @@ def save_head(model, stats, out_path):
         "stats": stats,
         "saved_at": datetime.now().isoformat(timespec="seconds"),
     }, out_path)
-    print(f"    Saved trained head → {out_path}")
+    print(f"    Saved trained head -> {out_path}")
 
 
 def save_head_versioned(
@@ -500,7 +500,7 @@ def save_head_versioned(
     if test_labels is not None:
         payload["test_labels"] = test_labels
     torch.save(payload, path)
-    print(f"    Saved versioned head → {path}")
+    print(f"    Saved versioned head -> {path}")
     return path
 
 

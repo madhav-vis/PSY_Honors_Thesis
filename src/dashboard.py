@@ -5,12 +5,18 @@ Run:  streamlit run src/dashboard.py
 
 import gc
 import json
+import multiprocessing as _mp
 import os
 import subprocess
 import sys
 import threading
 import time
 from collections import deque
+
+# Bail out fast if we were imported as a spawned multiprocessing worker
+# (see stream_annotator.py for the rationale).
+if _mp.current_process().name != "MainProcess":
+    sys.exit(0)
 
 import numpy as np
 import pandas as pd

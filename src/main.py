@@ -152,6 +152,11 @@ def main():
         print(f"  filter:               {FILTER_LOW}–{FILTER_HIGH} Hz")
         print(f"  target_channels:      {TARGET_CHANNELS}")
         print(f"  steps:                {args.steps}")
+        try:
+            from device_utils import device_summary
+            print(f"  compute device:       {device_summary()}")
+        except ImportError:
+            pass
         print(f"{'='*60}")
 
         if "all" in args.steps:

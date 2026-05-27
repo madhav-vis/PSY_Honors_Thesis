@@ -506,22 +506,33 @@ def compute_class_weights(y):
     return w
 
 
-def train_epoch(model, loader, optimizer, criterion, device, multimodal=False):
+def train_epoch(model, loader, optimizer, criterion, device, multimodal=False,
+                amp_on=False, scaler=None):
+    from device_utils import make_autocast
     model.train()
     total_loss, correct, total = 0.0, 0, 0
+    _non_blocking = device.type == "cuda"
     for batch in loader:
         if multimodal:
             x_eeg, x_et, y = batch
-            x_eeg, x_et, y = x_eeg.to(device), x_et.to(device), y.to(device)
-            logits = model(x_eeg, x_et)
+            x_eeg = x_eeg.to(device, non_blocking=_non_blocking)
+            x_et = x_et.to(device, non_blocking=_non_blocking)
+            y = y.to(device, non_blocking=_non_blocking)
         else:
             x, y = batch
-            x, y = x.to(device), y.to(device)
-            logits = model(x)
-        loss = criterion(logits, y)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            x = x.to(device, non_blocking=_non_blocking)
+            y = y.to(device, non_blocking=_non_blocking)
+        optimizer.zero_grad(set_to_none=True)
+        with make_autocast(device, enabled=amp_on):
+            logits = model(x_eeg, x_et) if multimodal else model(x)
+            loss = criterion(logits, y)
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
         total_loss += loss.item() * y.size(0)
         correct += (logits.argmax(1) == y).sum().item()
         total += y.size(0)
@@ -529,20 +540,25 @@ def train_epoch(model, loader, optimizer, criterion, device, multimodal=False):
 
 
 @torch.no_grad()
-def eval_epoch(model, loader, criterion, device, multimodal=False):
+def eval_epoch(model, loader, criterion, device, multimodal=False, amp_on=False):
+    from device_utils import make_autocast
     model.eval()
     total_loss, correct, total = 0.0, 0, 0
     all_preds, all_targets = [], []
+    _non_blocking = device.type == "cuda"
     for batch in loader:
         if multimodal:
             x_eeg, x_et, y = batch
-            x_eeg, x_et, y = x_eeg.to(device), x_et.to(device), y.to(device)
-            logits = model(x_eeg, x_et)
+            x_eeg = x_eeg.to(device, non_blocking=_non_blocking)
+            x_et = x_et.to(device, non_blocking=_non_blocking)
+            y = y.to(device, non_blocking=_non_blocking)
         else:
             x, y = batch
-            x, y = x.to(device), y.to(device)
-            logits = model(x)
-        loss = criterion(logits, y)
+            x = x.to(device, non_blocking=_non_blocking)
+            y = y.to(device, non_blocking=_non_blocking)
+        with make_autocast(device, enabled=amp_on):
+            logits = model(x_eeg, x_et) if multimodal else model(x)
+            loss = criterion(logits, y)
         total_loss += loss.item() * y.size(0)
         correct += (logits.argmax(1) == y).sum().item()
         total += y.size(0)
@@ -556,6 +572,8 @@ def train_dl_model(model, X_train, X_val, y_train, y_val,
                    X_et_train=None, X_et_val=None,
                    task_name="", save_dir=None):
     """Generic DL training loop for single or multimodal models."""
+    from device_utils import enable_cudnn_benchmark
+    enable_cudnn_benchmark()
     device = get_device()
     model = model.to(device)
     multimodal = X_et_train is not None
@@ -583,22 +601,30 @@ def train_dl_model(model, X_train, X_val, y_train, y_val,
         val_ds = TensorDataset(
             torch.from_numpy(X_val).float(), y_va_t)
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size)
+    _pin = device.type == "cuda"
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                              pin_memory=_pin)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, pin_memory=_pin)
+
+    from device_utils import use_amp as _use_amp, make_grad_scaler
+    amp_on = _use_amp()
+    scaler = make_grad_scaler(enabled=amp_on)
 
     best_val_acc = 0.0
     best_state = None
 
     print(f"\n  Training {task_name} on {device} "
-          f"({sum(p.numel() for p in model.parameters()):,} params)")
+          f"({sum(p.numel() for p in model.parameters()):,} params)"
+          + (f"  [AMP fp16]" if amp_on else ""))
     print(f"  Train: {len(X_train)}  Val: {len(X_val)}  "
           f"Epochs: {n_epochs}  Batch: {batch_size}")
 
     for epoch in range(n_epochs):
         tr_loss, tr_acc = train_epoch(
-            model, train_loader, optimizer, criterion, device, multimodal)
+            model, train_loader, optimizer, criterion, device, multimodal,
+            amp_on=amp_on, scaler=scaler if amp_on else None)
         va_loss, va_acc, va_preds, va_targets = eval_epoch(
-            model, val_loader, criterion, device, multimodal)
+            model, val_loader, criterion, device, multimodal, amp_on=amp_on)
         scheduler.step()
 
         if va_acc > best_val_acc:
@@ -1232,8 +1258,11 @@ def _nogo_kfold(model_factory, X_eeg, labels, n_folds=5, n_epochs=100,
         tr_t.append(torch.from_numpy(y_tr).long())
         te_t.append(torch.from_numpy(y_te).long())
 
-        train_ld = DataLoader(TensorDataset(*tr_t), batch_size=batch_size, shuffle=True)
-        test_ld = DataLoader(TensorDataset(*te_t), batch_size=batch_size)
+        _pin = device.type == "cuda"
+        train_ld = DataLoader(TensorDataset(*tr_t), batch_size=batch_size,
+                              shuffle=True, pin_memory=_pin)
+        test_ld = DataLoader(TensorDataset(*te_t), batch_size=batch_size,
+                             pin_memory=_pin)
 
         weights = compute_class_weights(y_tr).to(device)
         criterion = nn.CrossEntropyLoss(weight=weights)
@@ -1241,19 +1270,30 @@ def _nogo_kfold(model_factory, X_eeg, labels, n_folds=5, n_epochs=100,
         opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_epochs)
 
+        from device_utils import use_amp as _use_amp_cv, make_grad_scaler, make_autocast
+        _amp_cv = _use_amp_cv()
+        _scaler_cv = make_grad_scaler(enabled=_amp_cv)
+
         best_loss, best_state, no_imp = float("inf"), None, 0
 
         for epoch in range(n_epochs):
             model.train()
             for batch in train_ld:
                 if is_fusion:
-                    xe, xg, yb = [b.to(device) for b in batch]
-                    logits = model(xe, xg)
+                    xe, xg, yb = [b.to(device, non_blocking=_pin) for b in batch]
                 else:
-                    xb, yb = batch[0].to(device), batch[-1].to(device)
-                    logits = model(xb)
-                loss = criterion(logits, yb)
-                opt.zero_grad(); loss.backward(); opt.step()
+                    xb = batch[0].to(device, non_blocking=_pin)
+                    yb = batch[-1].to(device, non_blocking=_pin)
+                opt.zero_grad(set_to_none=True)
+                with make_autocast(device, enabled=_amp_cv):
+                    logits = model(xe, xg) if is_fusion else model(xb)
+                    loss = criterion(logits, yb)
+                if _amp_cv:
+                    _scaler_cv.scale(loss).backward()
+                    _scaler_cv.step(opt)
+                    _scaler_cv.update()
+                else:
+                    loss.backward(); opt.step()
             sched.step()
 
             model.eval()
@@ -1261,12 +1301,14 @@ def _nogo_kfold(model_factory, X_eeg, labels, n_folds=5, n_epochs=100,
             with torch.no_grad():
                 for batch in test_ld:
                     if is_fusion:
-                        xe, xg, yb = [b.to(device) for b in batch]
-                        logits = model(xe, xg)
+                        xe, xg, yb = [b.to(device, non_blocking=_pin) for b in batch]
                     else:
-                        xb, yb = batch[0].to(device), batch[-1].to(device)
-                        logits = model(xb)
-                    vloss += criterion(logits, yb).item() * yb.size(0)
+                        xb = batch[0].to(device, non_blocking=_pin)
+                        yb = batch[-1].to(device, non_blocking=_pin)
+                    with make_autocast(device, enabled=_amp_cv):
+                        logits = model(xe, xg) if is_fusion else model(xb)
+                        bloss = criterion(logits, yb)
+                    vloss += bloss.item() * yb.size(0)
                     vn += yb.size(0)
             vloss /= vn
 
@@ -1667,8 +1709,11 @@ def _loso_train_eval(model_factory, X_train, y_train, X_test, y_test,
     tr_tensors.append(torch.from_numpy(y_train).long())
     te_tensors.append(torch.from_numpy(y_test).long())
 
-    train_ld = DataLoader(TensorDataset(*tr_tensors), batch_size=batch_size, shuffle=True)
-    test_ld = DataLoader(TensorDataset(*te_tensors), batch_size=batch_size)
+    _pin = device.type == "cuda"
+    train_ld = DataLoader(TensorDataset(*tr_tensors), batch_size=batch_size,
+                          shuffle=True, pin_memory=_pin)
+    test_ld = DataLoader(TensorDataset(*te_tensors), batch_size=batch_size,
+                         pin_memory=_pin)
 
     weights = compute_class_weights(y_train).to(device)
     criterion = nn.CrossEntropyLoss(weight=weights)
@@ -1676,18 +1721,29 @@ def _loso_train_eval(model_factory, X_train, y_train, X_test, y_test,
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_epochs)
 
+    from device_utils import use_amp as _use_amp_l, make_grad_scaler, make_autocast
+    _amp_l = _use_amp_l()
+    _scaler_l = make_grad_scaler(enabled=_amp_l)
+
     best_loss, best_state, no_imp = float("inf"), None, 0
     for epoch in range(n_epochs):
         model.train()
         for batch in train_ld:
             if is_fusion:
-                xe, xg, yb = [b.to(device) for b in batch]
-                logits = model(xe, xg)
+                xe, xg, yb = [b.to(device, non_blocking=_pin) for b in batch]
             else:
-                xb, yb = batch[0].to(device), batch[-1].to(device)
-                logits = model(xb)
-            loss = criterion(logits, yb)
-            opt.zero_grad(); loss.backward(); opt.step()
+                xb = batch[0].to(device, non_blocking=_pin)
+                yb = batch[-1].to(device, non_blocking=_pin)
+            opt.zero_grad(set_to_none=True)
+            with make_autocast(device, enabled=_amp_l):
+                logits = model(xe, xg) if is_fusion else model(xb)
+                loss = criterion(logits, yb)
+            if _amp_l:
+                _scaler_l.scale(loss).backward()
+                _scaler_l.step(opt)
+                _scaler_l.update()
+            else:
+                loss.backward(); opt.step()
         sched.step()
 
         model.eval()
@@ -1695,12 +1751,14 @@ def _loso_train_eval(model_factory, X_train, y_train, X_test, y_test,
         with torch.no_grad():
             for batch in test_ld:
                 if is_fusion:
-                    xe, xg, yb = [b.to(device) for b in batch]
-                    logits = model(xe, xg)
+                    xe, xg, yb = [b.to(device, non_blocking=_pin) for b in batch]
                 else:
-                    xb, yb = batch[0].to(device), batch[-1].to(device)
-                    logits = model(xb)
-                vloss += criterion(logits, yb).item() * yb.size(0)
+                    xb = batch[0].to(device, non_blocking=_pin)
+                    yb = batch[-1].to(device, non_blocking=_pin)
+                with make_autocast(device, enabled=_amp_l):
+                    logits = model(xe, xg) if is_fusion else model(xb)
+                    bloss = criterion(logits, yb)
+                vloss += bloss.item() * yb.size(0)
                 vn += yb.size(0)
         vloss /= vn
         if vloss < best_loss:
@@ -2192,7 +2250,8 @@ def main():
 
     print(f"\nRun: {run_name}")
     print(f"Phases: {phases}")
-    print(f"Device: {get_device()}")
+    from device_utils import print_device_banner
+    print_device_banner(prefix="  ")
 
     all_results = {}
 

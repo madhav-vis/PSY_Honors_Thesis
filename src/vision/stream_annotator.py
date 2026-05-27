@@ -12,12 +12,20 @@ Six tabs:
 """
 
 import glob
+import multiprocessing as _mp
 import os
 import subprocess
 import sys
 import threading
 import time
 from collections import deque
+
+# If we were imported as a multiprocessing spawn worker (e.g. a stray
+# DataLoader worker on Windows), bail out immediately. Without this guard
+# Python re-runs the entire Streamlit script per worker, which crashes on
+# missing files and corrupts Streamlit's session state.
+if _mp.current_process().name != "MainProcess":
+    sys.exit(0)
 
 import numpy as np
 import pandas as pd
@@ -536,8 +544,15 @@ with t_label:
         st.stop()
 
     # Load all PNGs + per-labeler labeled set
+    _crop_dir = get_crop_dir(sj_num, condition)
+    if not os.path.isdir(_crop_dir):
+        st.warning(
+            f"Crop directory missing for **sj{sj_num:02d} {condition}**: "
+            f"`{_crop_dir}`. Generate crops first from the Generate Crops tab."
+        )
+        st.stop()
     all_pngs = sorted(
-        f for f in os.listdir(get_crop_dir(sj_num, condition))
+        f for f in os.listdir(_crop_dir)
         if f.lower().endswith(".png")
     )
     subject_labels_df = load_labels_for(sj_num, condition)

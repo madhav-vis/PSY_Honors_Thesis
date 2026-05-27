@@ -346,15 +346,39 @@ def _eval_resnet(crop_records, y, train_idx, val_idx, test_idx,
         loss_fn=loss_fn,
     )
 
+    _eval_device = _get_eval_device()
+    _pin = _eval_device.type == "cuda"
+    from device_utils import (
+        dataloader_workers as _dl_workers,
+        persistent_workers as _persistent,
+        prefetch_factor as _prefetch,
+        use_amp as _use_amp,
+        use_channels_last as _channels_last,
+        make_autocast,
+    )
+    _nw = _dl_workers()
+    _pw = _persistent() and _nw > 0
+    _pf = {"prefetch_factor": _prefetch()} if _nw > 0 else {}
+    _amp = _use_amp()
+    _cl = _channels_last()
     _, val_tfm = _get_transforms()
     test_ds = CropDataset(test_records, transform=val_tfm)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
-                             num_workers=0)
-    preds_list = []
+                             num_workers=_nw, pin_memory=_pin,
+                             persistent_workers=_pw, **_pf)
+    model = model.to(_eval_device)
+    if _cl:
+        model = model.to(memory_format=torch.channels_last)
     model.eval()
+    preds_list = []
     with torch.no_grad():
         for imgs, _ in test_loader:
-            preds_list.extend(model(imgs).argmax(1).numpy())
+            imgs = imgs.to(_eval_device, non_blocking=_pin)
+            if _cl:
+                imgs = imgs.to(memory_format=torch.channels_last)
+            with make_autocast(_eval_device, enabled=_amp):
+                logits = model(imgs)
+            preds_list.extend(logits.argmax(1).cpu().numpy())
 
     del model
     gc.collect()

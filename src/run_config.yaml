@@ -2,7 +2,7 @@ run_name: "sj_17_test"
 date: "auto"
 data:
   root: "C:/Users/twbul/OneDrive/Desktop/Subjects_Walking_Outdoors"
-  subjects: [17]
+  subjects: [7,9,14,17,19]
   world_video_dir:  "C:/Users/twbul/OneDrive/Desktop/Subjects_Walking_Outdoors/worldvideos"
 
 eeg:

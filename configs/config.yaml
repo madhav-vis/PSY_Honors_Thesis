@@ -65,6 +65,33 @@ training:
   early_stopping_patience: 10
   random_seed: 42
 
+compute:
+  # Mixed-precision (autocast + GradScaler) on CUDA. Roughly 1.5-2x faster
+  # on a 4090 for ResNet/EEGNet, with fp16 numerics. Set to false if you
+  # want bit-identical results to the published CPU/CPU-fp32 metrics.
+  use_amp: true
+  # DataLoader worker processes for image-loading datasets (ResNet, etc.).
+  # 0 = single-process (slow on JPEG-heavy data). 8 is a good default for
+  # a 4090-class GPU paired with a modern desktop CPU. Drop to 4 if you see
+  # memory pressure; raise to 12+ on a 16-core+ workstation.
+  dataloader_workers: 8
+  # Number of batches each worker prefetches into a queue. 4 helps smooth
+  # over disk-latency spikes (OneDrive, network drives, slow SSDs).
+  prefetch_factor: 4
+  # Keep worker processes alive between epochs (avoids respawn cost). Only
+  # used when dataloader_workers > 0.
+  persistent_workers: true
+  # cuDNN autotuner: tries multiple kernel implementations on the first
+  # batch and picks the fastest. ~5-15% speedup for fixed-shape conv nets
+  # (ResNet, EEGNet) at the cost of ~1s extra at the start of training.
+  cudnn_benchmark: true
+  # channels-last memory format for conv nets. In theory another 10-30%
+  # throughput on Ada/Ampere with AMP, but in practice it depends heavily
+  # on the (torch + cudnn + GPU + model) combo. On RTX 4090 + torch 2.10 +
+  # cu126 we measured a regression for ResNet-50 + fp16, so default is OFF.
+  # Benchmark with `python -c "from device_utils import ..."` before flipping.
+  channels_last: false
+
 loso:
   enabled: true
   subjects: [3, 4]
