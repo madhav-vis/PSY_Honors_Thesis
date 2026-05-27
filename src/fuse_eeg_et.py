@@ -4,7 +4,7 @@ import os
 import mne
 import pandas as pd
 
-from config import CONDITIONS, OUTPUT_DATA_DIR, SUBJECTS
+from config import CONDITIONS, OUTPUT_DATA_DIR, PROJECT_ROOT, SUBJECTS
 from eeg_preprocess import align_to_eeg_events
 
 
@@ -43,6 +43,11 @@ def fuse(sj_num, cond):
     vision_path = os.path.join(
         OUTPUT_DATA_DIR, f"sj{sj_num:02d}_{label}_vision_trial_features.csv"
     )
+    if not os.path.exists(vision_path):
+        vision_path = os.path.join(
+            PROJECT_ROOT, "data", "vision_features",
+            f"sj{sj_num:02d}_{label}_vision_trial_features.csv"
+        )
     if os.path.exists(vision_path):
         vision_df = pd.read_csv(vision_path)
 

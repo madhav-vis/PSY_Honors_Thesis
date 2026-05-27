@@ -771,13 +771,16 @@ def evaluate_eeg_loso(run_dirs=None, progress_cb=None):
 # ═══════════════════════════════════════════════════════════
 
 def relabel_crops_with_best(best_model_name, run_name=None,
-                            progress_cb=None):
+                            progress_cb=None, output_dir=None):
     """Relabel ALL crops with the best vision model and regenerate
     fusion features for the EEG pipeline.
 
     Args:
         best_model_name: "clip_head" or "resnet50"
-        run_name: target run directory (default: latest)
+        run_name: target run directory (default: latest). Ignored if
+            output_dir is provided.
+        output_dir: standalone output directory for results and features.
+            If provided, writes all CSVs here instead of into a run.
 
     Returns dict with relabeling summary.
     """
@@ -786,18 +789,24 @@ def relabel_crops_with_best(best_model_name, run_name=None,
 
     label_names = list(CATEGORIES.keys())
 
-    if run_name is None:
-        runs = sorted(
-            [d for d in os.listdir(RUNS_ROOT)
-             if os.path.isdir(os.path.join(RUNS_ROOT, d))],
-            reverse=True,
-        )
-        if not runs:
-            return {"error": "no_runs"}
-        run_name = runs[0]
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        run_path = None
+        vision_root = None
+        run_name = None
+    else:
+        if run_name is None:
+            runs = sorted(
+                [d for d in os.listdir(RUNS_ROOT)
+                 if os.path.isdir(os.path.join(RUNS_ROOT, d))],
+                reverse=True,
+            )
+            if not runs:
+                return {"error": "no_runs"}
+            run_name = runs[0]
 
-    run_path = os.path.join(RUNS_ROOT, run_name)
-    vision_root = os.path.join(run_path, "vision")
+        run_path = os.path.join(RUNS_ROOT, run_name)
+        vision_root = os.path.join(run_path, "vision")
 
     if best_model_name == "clip_head":
         from vision.classifier import GazeClassifier
@@ -907,33 +916,76 @@ def relabel_crops_with_best(best_model_name, run_name=None,
             records.append(rec)
 
         results_df = pd.DataFrame(records)
+
+        if "timestamp_ns" in results_df.columns and "timestamp_s" not in results_df.columns:
+            try:
+                from vision.config import get_eye_dir, ET_FOLDER_MAP
+                from vision.label_store import data_root_from_config
+                _dr = data_root_from_config()
+                if _dr and condition in ET_FOLDER_MAP:
+                    _gaze_csv = os.path.join(
+                        get_eye_dir(_dr, sj_num, condition),
+                        "gaze_positions.csv")
+                    if os.path.exists(_gaze_csv):
+                        _gaze_t0 = pd.read_csv(
+                            _gaze_csv, usecols=["timestamp [ns]"], nrows=1
+                        )["timestamp [ns]"].iloc[0]
+                        results_df["timestamp_s"] = (
+                            results_df["timestamp_ns"] - _gaze_t0
+                        ) / 1e9
+            except Exception:
+                pass
+
         total_relabeled += len(results_df)
 
-        vis_dir = os.path.join(vision_root,
-                               f"sj{sj_num:02d}_{condition}")
-        if os.path.isdir(vis_dir):
+        if output_dir:
             csv_path = os.path.join(
-                vis_dir,
+                output_dir,
                 f"sj{sj_num:02d}_{condition}_vision_results.csv")
-            if os.path.exists(csv_path):
-                old_df = pd.read_csv(csv_path)
-                keep_cols = [c for c in old_df.columns
-                             if c not in results_df.columns
-                             or c == "fixation_id"]
-                if len(keep_cols) > 1:
-                    merged = results_df.merge(
-                        old_df[keep_cols], on="fixation_id", how="left")
-                    results_df = merged
             results_df.to_csv(csv_path, index=False)
+            feat_path = os.path.join(
+                output_dir,
+                f"sj{sj_num:02d}_{condition}_vision_trial_features.csv")
+            et_path = None
+        else:
+            vis_dir = os.path.join(vision_root,
+                                   f"sj{sj_num:02d}_{condition}")
+            if os.path.isdir(vis_dir):
+                csv_path = os.path.join(
+                    vis_dir,
+                    f"sj{sj_num:02d}_{condition}_vision_results.csv")
+                if os.path.exists(csv_path):
+                    old_df = pd.read_csv(csv_path)
+                    keep_cols = [c for c in old_df.columns
+                                 if c not in results_df.columns
+                                 or c == "fixation_id"]
+                    if len(keep_cols) > 1:
+                        merged = results_df.merge(
+                            old_df[keep_cols], on="fixation_id", how="left")
+                        results_df = merged
+                results_df.to_csv(csv_path, index=False)
 
-        data_dir = os.path.join(run_path, "data")
-        et_path = os.path.join(
-            data_dir, f"sj{sj_num:02d}_{condition}_ET_Prepro1.csv")
-        feat_path = os.path.join(
-            data_dir,
-            f"sj{sj_num:02d}_{condition}_vision_trial_features.csv")
+            data_dir = os.path.join(run_path, "data")
+            et_path = os.path.join(
+                data_dir, f"sj{sj_num:02d}_{condition}_ET_Prepro1.csv")
+            feat_path = os.path.join(
+                data_dir,
+                f"sj{sj_num:02d}_{condition}_vision_trial_features.csv")
 
-        if os.path.exists(et_path) and "timestamp_s" in results_df.columns:
+        if et_path is None and output_dir and os.path.isdir(RUNS_ROOT):
+            for _run in sorted(
+                (d for d in os.listdir(RUNS_ROOT)
+                 if os.path.isdir(os.path.join(RUNS_ROOT, d))),
+                reverse=True,
+            ):
+                _cand = os.path.join(
+                    RUNS_ROOT, _run, "data",
+                    f"sj{sj_num:02d}_{condition}_ET_Prepro1.csv")
+                if os.path.exists(_cand):
+                    et_path = _cand
+                    break
+
+        if et_path and os.path.exists(et_path) and "timestamp_s" in results_df.columns:
             et_df = pd.read_csv(et_path)
             cat_labels = label_names
             trial_records = []

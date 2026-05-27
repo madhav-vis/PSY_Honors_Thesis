@@ -63,6 +63,14 @@ from vision.label_store import (
     subject_condition_counts,
 )
 from vision.vision_main import generate_crops_for_condition
+from evaluate import (
+    evaluate_vision_models,
+    relabel_crops_with_best,
+    make_cm_figure,
+    load_vision_data,
+    generate_vision_table,
+    RESULTS_DIR,
+)
 
 LABEL_NAMES = list(CATEGORIES.keys())
 RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
@@ -311,6 +319,19 @@ def _aggregate_vision_results(run_name, subjects_tuple, conds_tuple):
 
 _CAT_COLORS = CATEGORY_COLORS
 
+VISION_FEATURES_DIR = os.path.join(PROJECT_ROOT, "data", "vision_features")
+
+
+@st.cache_data(ttl=60)
+def _load_vision_comparison():
+    """Load previously saved vision comparison results."""
+    path = os.path.join(RESULTS_DIR, "vision_comparison.json")
+    if os.path.exists(path):
+        import json
+        with open(path) as f:
+            return json.load(f)
+    return None
+
 
 # ── Sidebar ───────────────────────────────────────────────────
 
@@ -351,8 +372,8 @@ with st.sidebar:
 
 # ── Main tabs ─────────────────────────────────────────────────
 
-t_gen, t_label, t_stats, t_train, t_eval, t_results = st.tabs([
-    "Generate Crops", "Label", "Statistics", "Train", "Evaluate", "Results"
+t_gen, t_label, t_stats, t_train, t_eval, t_deploy = st.tabs([
+    "Generate Crops", "Label", "Statistics", "Train", "Evaluate", "Deploy"
 ])
 
 
@@ -1153,374 +1174,259 @@ with t_train:
 
 
 # ═══════════════════════════════════════════════════════════════
-# TAB 5 — Evaluate
+# TAB 5 — Evaluate (3-way model comparison)
 # ═══════════════════════════════════════════════════════════════
 
 with t_eval:
-    st.header("Model Evaluation")
+    st.header("Model Comparison")
+    st.markdown(
+        "Compare **CLIP zero-shot**, **CLIP linear head**, and **ResNet-50** "
+        "on your labeled crops using repeated stratified splits."
+    )
 
-    from vision.train_head import list_saved_models, load_head
-    saved_models = list_saved_models(MODELS_DIR)
+    _prev_results = _load_vision_comparison()
 
-    if not saved_models:
-        st.info("No saved models yet. Train a model in the Train tab.")
-    else:
-        model_options = {m["filename"]: m for m in saved_models}
-        selected_files = st.multiselect(
-            "Select models to evaluate",
-            list(model_options.keys()),
-            default=[saved_models[0]["filename"]],
-            format_func=lambda f: (
-                f"{model_options[f]['model_type']}  |  "
-                f"val={model_options[f]['val_acc']:.3f}  "
-                f"test={model_options[f]['test_acc'] or '?'}  |  "
-                f"{model_options[f]['saved_at'][:16]}"
-            ),
+    if _prev_results and "summary" in _prev_results:
+        st.subheader("Previous Results")
+        _, comp_df = generate_vision_table(_prev_results)
+        st.dataframe(comp_df, hide_index=True, use_container_width=True)
+
+        best = _prev_results["summary"].get("best_model")
+        if best:
+            best_f1 = _prev_results["summary"][best]["macro_f1_mean"]
+            _model_display = {
+                "clip_zeroshot": "Zero-shot CLIP",
+                "clip_head": "CLIP Linear Head",
+                "resnet50": "ResNet-50",
+            }
+            st.success(
+                f"Best model: **{_model_display.get(best, best)}** "
+                f"(macro F1 = {best_f1:.3f})"
+            )
+
+        with st.expander("Confusion Matrices"):
+            import matplotlib
+            matplotlib.use("Agg")
+
+            _cm_models = {
+                "clip_zeroshot": "Zero-shot CLIP",
+                "clip_head": "CLIP Linear Head",
+                "resnet50": "ResNet-50",
+            }
+            label_names = _prev_results.get("label_names", LABEL_NAMES)
+            for key, display in _cm_models.items():
+                s = _prev_results["summary"].get(key)
+                if s and "confusion_matrix" in s:
+                    fig = make_cm_figure(
+                        s["confusion_matrix"], label_names, title=display
+                    )
+                    st.pyplot(fig)
+                    import matplotlib.pyplot as plt
+                    plt.close(fig)
+
+    st.markdown("---")
+    st.subheader("Run New Comparison")
+
+    n_repeats = st.slider(
+        "Number of repeated splits", 1, 10, 3,
+        help="More repeats = more stable estimates, but slower."
+    )
+
+    if st.button("Run Comparison", type="primary"):
+        progress_bar = st.progress(0.0)
+        status_text = st.empty()
+
+        def _eval_cb(step, total_steps, message):
+            progress_bar.progress(step / total_steps)
+            status_text.markdown(f"**Step {step}/{total_steps}**: {message}")
+
+        with st.spinner("Running model comparison..."):
+            result = evaluate_vision_models(
+                n_repeats=n_repeats, progress_cb=_eval_cb
+            )
+
+        progress_bar.progress(1.0)
+        status_text.empty()
+
+        if result and "error" not in result:
+            st.cache_data.clear()
+            _, comp_df = generate_vision_table(result)
+            st.dataframe(comp_df, hide_index=True, use_container_width=True)
+
+            best = result["summary"].get("best_model")
+            if best:
+                best_f1 = result["summary"][best]["macro_f1_mean"]
+                _model_display = {
+                    "clip_zeroshot": "Zero-shot CLIP",
+                    "clip_head": "CLIP Linear Head",
+                    "resnet50": "ResNet-50",
+                }
+                st.success(
+                    f"Best model: **{_model_display.get(best, best)}** "
+                    f"(macro F1 = {best_f1:.3f})"
+                )
+            st.info("Results saved to `results/vision_comparison.json`.")
+        elif result and result.get("error") == "insufficient_data":
+            st.error(
+                "Not enough labeled data. Label at least 20 crops "
+                "in the Label tab before running evaluation."
+            )
+        else:
+            st.error("Evaluation failed. Check console for details.")
+
+    if not _prev_results:
+        st.info(
+            "No previous results found. Click **Run Comparison** above to "
+            "evaluate CLIP zero-shot vs CLIP head vs ResNet-50 on your "
+            "labeled crops."
         )
 
-        if not selected_files:
-            st.info("Select at least one model above.")
-        else:
-            # ── Summary comparison table ──────────────────────────
-            st.subheader("Summary comparison")
-            summary_rows = []
-            for fname in selected_files:
-                m = model_options[fname]
-                summary_rows.append({
-                    "Model": fname,
-                    "Type": m["model_type"],
-                    "Val acc": f"{m['val_acc']:.3f}" if m["val_acc"] else "—",
-                    "Test acc": f"{m['test_acc']:.3f}" if m["test_acc"] else "—",
-                    "Split": m["split_strategy"],
-                    "N train": m["n_samples"],
-                })
-            st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
-
-            # ── Per-model detail ──────────────────────────────────
-            for fname in selected_files:
-                m = model_options[fname]
-                with st.expander(f"Details: {fname}", expanded=len(selected_files) == 1):
-                    try:
-                        ckpt = __import__("torch").load(
-                            m["path"], map_location="cpu", weights_only=False
-                        )
-                        stats = ckpt.get("stats", {})
-                        label_names = stats.get("label_names", LABEL_NAMES)
-                        test_order = stats.get("test_label_order", label_names)
-
-                        # Training history chart
-                        history = stats.get("history", [])
-                        if history:
-                            hist_df = pd.DataFrame(history).set_index("epoch")
-                            st.markdown("**Training history**")
-                            st.line_chart(hist_df)
-
-                        # Test classification report
-                        test_report = stats.get("test_classification_report") or \
-                                      stats.get("classification_report")
-                        if test_report:
-                            st.markdown("**Test-set classification report**")
-                            report_rows = []
-                            for cls_name, metrics in test_report.items():
-                                if cls_name in ("accuracy", "macro avg", "weighted avg"):
-                                    continue
-                                if isinstance(metrics, dict):
-                                    report_rows.append({
-                                        "Class": cls_name,
-                                        "Precision": f"{metrics.get('precision', 0):.3f}",
-                                        "Recall": f"{metrics.get('recall', 0):.3f}",
-                                        "F1": f"{metrics.get('f1-score', 0):.3f}",
-                                        "Support": int(metrics.get("support", 0)),
-                                    })
-                            if report_rows:
-                                report_df = pd.DataFrame(report_rows)
-                                st.dataframe(report_df, hide_index=True, use_container_width=True)
-                            macro = test_report.get("macro avg", {})
-                            weighted = test_report.get("weighted avg", {})
-                            if macro:
-                                st.markdown(
-                                    f"**Macro avg** — "
-                                    f"precision: `{macro.get('precision',0):.3f}` "
-                                    f"recall: `{macro.get('recall',0):.3f}` "
-                                    f"F1: `{macro.get('f1-score',0):.3f}`"
-                                )
-
-                        # Confusion matrix
-                        test_cm = stats.get("test_confusion_matrix")
-                        if test_cm and test_order:
-                            st.markdown("**Confusion matrix (test set)**")
-                            try:
-                                import plotly.figure_factory as ff
-                                cm_arr = np.array(test_cm)
-                                fig = ff.create_annotated_heatmap(
-                                    z=cm_arr,
-                                    x=test_order,
-                                    y=test_order,
-                                    colorscale="Blues",
-                                    showscale=True,
-                                )
-                                fig.update_layout(
-                                    xaxis_title="Predicted",
-                                    yaxis_title="True",
-                                    margin=dict(t=30, b=30),
-                                    height=400,
-                                )
-                                fig.update_xaxes(side="bottom")
-                                st.plotly_chart(fig, use_container_width=True)
-                            except ImportError:
-                                st.dataframe(
-                                    pd.DataFrame(test_cm, index=test_order, columns=test_order),
-                                    use_container_width=True,
-                                )
-
-                        # Show test sample crops if filenames were saved
-                        test_fnames = ckpt.get("test_filenames", [])
-                        test_true = ckpt.get("test_labels", [])
-                        if test_fnames and test_true:
-                            st.markdown("**Test set sample crops**")
-                            show_n = min(10, len(test_fnames))
-                            crop_cols = st.columns(5)
-                            for i in range(show_n):
-                                fn = test_fnames[i]
-                                lbl = test_true[i] if i < len(test_true) else "?"
-                                # Try to find which sj/cond this filename belongs to
-                                found = False
-                                for sj, cond, _ in _get_all_pairs_with_crops():
-                                    fpath = get_crop_path(sj, cond, fn)
-                                    if os.path.exists(fpath):
-                                        with crop_cols[i % 5]:
-                                            st.image(fpath, width=110)
-                                            color = CATEGORY_COLORS.get(lbl, "#888")
-                                            st.markdown(
-                                                f"<span style='color:{color}; font-size:11px'>"
-                                                f"{lbl}</span>",
-                                                unsafe_allow_html=True,
-                                            )
-                                        found = True
-                                        break
-
-                    except Exception as exc:
-                        st.error(f"Could not load checkpoint: {exc}")
-
 
 # ═══════════════════════════════════════════════════════════════
-# TAB 6 — Results (Vision Pipeline Output)
+# TAB 6 — Deploy (Classify all crops with best model)
 # ═══════════════════════════════════════════════════════════════
 
-with t_results:
-    st.header("Vision Pipeline Results")
+with t_deploy:
+    st.header("Deploy Best Model")
+    st.markdown(
+        "Classify **all** crops with the best vision model and generate "
+        "`vision_trial_features.csv` for the fusion pipeline."
+    )
 
-    _res_runs = _list_runs()
-    if not _res_runs:
-        st.info("No runs found in `runs/`.")
-    else:
-        _res_run = st.selectbox("Run", _res_runs, key="results_run")
-        _res_subjects, _res_conditions = _find_subjects_conditions(_res_run)
+    # ── Evaluation summary ───────────────────────────────────
+    _deploy_results = _load_vision_comparison()
+    _model_display = {
+        "clip_zeroshot": "Zero-shot CLIP",
+        "clip_head": "CLIP Linear Head",
+        "resnet50": "ResNet-50",
+    }
 
-        if not _res_subjects:
-            st.info("No subjects with data in this run.")
-        else:
-            _res_view = st.radio(
-                "View mode",
-                ["All subjects (average)", "Single subject"],
-                index=0,
-                horizontal=True,
-                key="results_view_mode",
+    if _deploy_results and "summary" in _deploy_results:
+        best = _deploy_results["summary"].get("best_model")
+        if best:
+            best_f1 = _deploy_results["summary"][best]["macro_f1_mean"]
+            st.success(
+                f"Evaluation winner: **{_model_display.get(best, best)}** "
+                f"(macro F1 = {best_f1:.3f})"
             )
-            _res_aggregate = _res_view.startswith("All")
+    else:
+        best = None
+        st.warning(
+            "No evaluation results found. Run the comparison in the "
+            "**Evaluate** tab first, or select a model manually below."
+        )
 
-            if _res_aggregate:
-                st.subheader(f"Aggregate — {len(_res_subjects)} subject(s)")
+    # ── Model selector ────────────────────────────────────────
+    _available_models = []
+    if os.path.exists(os.path.join(MODELS_DIR, "resnet50.pt")) or \
+       any(f.startswith("resnet") and f.endswith(".pt")
+           for f in os.listdir(MODELS_DIR) if os.path.isfile(os.path.join(MODELS_DIR, f))):
+        _available_models.append("resnet50")
+    if os.path.exists(os.path.join(MODELS_DIR, "clip_head.pt")):
+        _available_models.append("clip_head")
 
-                pooled = _aggregate_vision_results(
-                    _res_run, tuple(_res_subjects), tuple(_res_conditions))
+    if not _available_models:
+        st.error("No trained models found in `models/`. Train a model first.")
+    else:
+        _default_idx = 0
+        if best and best in _available_models:
+            _default_idx = _available_models.index(best)
 
-                if pooled is None or len(pooled) == 0:
-                    st.info(
-                        "No `vision_results.csv` found for any subject. "
-                        "Run the vision pipeline first."
-                    )
-                else:
-                    _c1, _c2, _c3, _c4 = st.columns(4)
-                    _c1.metric("Total Fixations", len(pooled))
-                    _c2.metric("Subjects", pooled["subject"].nunique())
-                    if "confidence" in pooled.columns:
-                        _c3.metric("Mean Confidence",
-                                   f"{pooled['confidence'].mean():.3f}")
-                    if "cluster_id" in pooled.columns:
-                        _c4.metric("N Clusters (pooled)",
-                                   pooled["cluster_id"].nunique())
+        deploy_model = st.radio(
+            "Model to deploy",
+            _available_models,
+            index=_default_idx,
+            format_func=lambda m: _model_display.get(m, m),
+            horizontal=True,
+        )
 
-                    if "gaze_target_category" in pooled.columns:
-                        cat_counts = pooled["gaze_target_category"].value_counts()
-                        fig_cat = px.bar(
-                            x=cat_counts.index,
-                            y=cat_counts.values,
-                            labels={"x": "Category", "y": "Count"},
-                            color=cat_counts.index,
-                            color_discrete_map=_CAT_COLORS,
-                        )
-                        fig_cat.update_layout(
-                            showlegend=False, height=380,
-                            title="Category Distribution (pooled across subjects)",
-                        )
-                        st.plotly_chart(fig_cat, use_container_width=True)
+        # ── Crop inventory ───────────────────────────────────
+        st.markdown("---")
+        st.subheader("Crop Inventory")
 
-                    if "cluster_id" in pooled.columns:
-                        cluster_counts = pooled["cluster_id"].value_counts().sort_index()
-                        fig_cl = px.bar(
-                            x=cluster_counts.index.astype(str),
-                            y=cluster_counts.values,
-                            labels={"x": "Cluster ID", "y": "Count"},
-                            color=cluster_counts.index.astype(str),
-                        )
-                        fig_cl.update_layout(
-                            showlegend=False, height=320,
-                            title="Cluster Size Distribution (pooled)",
-                        )
-                        st.plotly_chart(fig_cl, use_container_width=True)
+        from vision.label_store import CROPS_BASE
+        _crop_dirs = []
+        if os.path.isdir(CROPS_BASE):
+            for d in sorted(os.listdir(CROPS_BASE)):
+                dp = os.path.join(CROPS_BASE, d)
+                if os.path.isdir(dp):
+                    n = sum(1 for f in os.listdir(dp) if f.endswith(".png"))
+                    _crop_dirs.append({"Directory": d, "Crops": n})
 
-                    if "confidence" in pooled.columns:
-                        fig_conf = px.histogram(
-                            pooled, x="confidence", nbins=30,
-                            labels={"confidence": "CLIP Confidence"},
-                            color_discrete_sequence=["#3498db"],
-                        )
-                        fig_conf.add_vline(x=0.25, line_dash="dash",
-                                           line_color="red",
-                                           annotation_text="chance")
-                        fig_conf.add_vline(x=0.45, line_dash="dash",
-                                           line_color="green",
-                                           annotation_text="reliable")
-                        fig_conf.update_layout(height=320,
-                                               title="Confidence Distribution (pooled)")
-                        st.plotly_chart(fig_conf, use_container_width=True)
+        if not _crop_dirs:
+            st.warning(
+                "No crops found in `data/crops/`. "
+                "Generate crops in the **Generate Crops** tab first."
+            )
+        else:
+            st.dataframe(
+                pd.DataFrame(_crop_dirs), hide_index=True,
+                use_container_width=True,
+            )
+            total_crops = sum(r["Crops"] for r in _crop_dirs)
+            st.markdown(f"**Total: {total_crops} crops** across "
+                        f"{len(_crop_dirs)} subject/condition pairs")
 
-                    if "gaze_target_category" in pooled.columns:
-                        with st.expander("Category breakdown by subject"):
-                            per_sj = (
-                                pooled.groupby(["subject", "gaze_target_category"])
-                                .size()
-                                .unstack(fill_value=0)
-                            )
-                            st.dataframe(per_sj, use_container_width=True)
-
-            else:
-                _res_sj = st.selectbox(
-                    "Subject", _res_subjects,
-                    format_func=lambda x: f"sj{x:02d}",
-                    key="results_subject",
+            # ── Check existing output ────────────────────────
+            _existing_features = []
+            if os.path.isdir(VISION_FEATURES_DIR):
+                _existing_features = [
+                    f for f in os.listdir(VISION_FEATURES_DIR)
+                    if f.endswith("_vision_trial_features.csv")
+                ]
+            if _existing_features:
+                st.info(
+                    f"{len(_existing_features)} feature files already exist "
+                    f"in `data/vision_features/`."
                 )
-                st.subheader(f"Vision — sj{_res_sj:02d}")
 
-                vp_dir = _vision_plots_dir(_res_run)
+            # ── Deploy button ─────────────────────────────────
+            st.markdown("---")
+            if st.button("Deploy Model", type="primary"):
+                os.makedirs(VISION_FEATURES_DIR, exist_ok=True)
 
-                for _v_cond in _res_conditions:
-                    st.markdown("---")
-                    st.subheader(f"{_v_cond}")
+                progress_bar = st.progress(0.0)
+                status_text = st.empty()
 
-                    _v_prefix = f"sj{_res_sj:02d}_{_v_cond}"
-
-                    v5_img = os.path.join(vp_dir, f"{_v_prefix}_V5_embedding_clusters.png")
-                    if os.path.exists(v5_img):
-                        st.image(v5_img, use_container_width=True,
-                                 caption="CLIP Embedding Clusters (UMAP)")
-
-                    v4_img = os.path.join(vp_dir, f"{_v_prefix}_V4_optimal_k.png")
-                    if os.path.exists(v4_img):
-                        st.image(v4_img, use_container_width=True,
-                                 caption="Optimal K Analysis")
-
-                    v6_img = os.path.join(vp_dir, f"{_v_prefix}_V6_cluster_timeline.png")
-                    if os.path.exists(v6_img):
-                        st.image(v6_img, use_container_width=True,
-                                 caption="Cluster Timeline")
-
-                    v1_img = os.path.join(vp_dir, f"{_v_prefix}_V1_labeled_frames.png")
-                    if os.path.exists(v1_img):
-                        st.image(v1_img, use_container_width=True,
-                                 caption="Labeled Frame Grid")
-
-                    v2_img = os.path.join(vp_dir, f"{_v_prefix}_V2_category_timeline.png")
-                    if os.path.exists(v2_img):
-                        st.image(v2_img, use_container_width=True,
-                                 caption="Category Timeline")
-
-                    v3_img = os.path.join(vp_dir, f"{_v_prefix}_V3_clip_vs_human.png")
-                    if os.path.exists(v3_img):
-                        st.image(v3_img, use_container_width=True,
-                                 caption="CLIP vs Human Labels (Accuracy)")
-
-                    vr_path = os.path.join(
-                        _vision_dir(_res_run, _res_sj, _v_cond),
-                        f"sj{_res_sj:02d}_{_v_cond}_vision_results.csv",
+                def _deploy_cb(step, total, message):
+                    progress_bar.progress(step / total)
+                    status_text.markdown(
+                        f"**{step}/{total}**: {message}"
                     )
-                    vision_results = _load_csv(vr_path)
-                    if vision_results is not None:
-                        _c1, _c2, _c3 = st.columns(3)
-                        _c1.metric("Total Fixations", len(vision_results))
-                        if "confidence" in vision_results.columns:
-                            _c2.metric("Mean Confidence",
-                                       f"{vision_results['confidence'].mean():.3f}")
-                        if "cluster_id" in vision_results.columns:
-                            _c3.metric("N Clusters",
-                                       vision_results["cluster_id"].nunique())
 
-                        if "gaze_target_category" in vision_results.columns:
-                            cat_counts = vision_results["gaze_target_category"].value_counts()
-                            fig_cat = px.bar(
-                                x=cat_counts.index,
-                                y=cat_counts.values,
-                                labels={"x": "Category", "y": "Count"},
-                                color=cat_counts.index,
-                                color_discrete_map=_CAT_COLORS,
-                            )
-                            fig_cat.update_layout(showlegend=False, height=350,
-                                                  title="Category Distribution")
-                            st.plotly_chart(fig_cat, use_container_width=True)
-
-                        if "cluster_id" in vision_results.columns:
-                            cluster_counts = vision_results["cluster_id"].value_counts().sort_index()
-                            fig_cl = px.bar(
-                                x=cluster_counts.index.astype(str),
-                                y=cluster_counts.values,
-                                labels={"x": "Cluster ID", "y": "Count"},
-                                color=cluster_counts.index.astype(str),
-                            )
-                            fig_cl.update_layout(showlegend=False, height=300,
-                                                 title="Cluster Size Distribution")
-                            st.plotly_chart(fig_cl, use_container_width=True)
-
-                        if "confidence" in vision_results.columns:
-                            fig_conf = px.histogram(
-                                vision_results, x="confidence", nbins=30,
-                                labels={"confidence": "CLIP Confidence"},
-                                color_discrete_sequence=["#3498db"],
-                            )
-                            fig_conf.add_vline(x=0.25, line_dash="dash",
-                                               line_color="red",
-                                               annotation_text="chance")
-                            fig_conf.add_vline(x=0.45, line_dash="dash",
-                                               line_color="green",
-                                               annotation_text="reliable")
-                            fig_conf.update_layout(height=300,
-                                                   title="Confidence Distribution")
-                            st.plotly_chart(fig_conf, use_container_width=True)
-
-                        with st.expander("Full Fixation Table"):
-                            st.dataframe(vision_results, use_container_width=True,
-                                         height=400)
-
-                    crops_d = os.path.join(
-                        _vision_dir(_res_run, _res_sj, _v_cond), "crops"
+                with st.spinner(
+                    f"Classifying all crops with "
+                    f"{_model_display.get(deploy_model, deploy_model)}..."
+                ):
+                    deploy_result = relabel_crops_with_best(
+                        deploy_model,
+                        run_name=None,
+                        progress_cb=_deploy_cb,
+                        output_dir=VISION_FEATURES_DIR,
                     )
-                    if os.path.isdir(crops_d):
-                        crop_files = sorted(glob.glob(os.path.join(crops_d, "*.png")))
-                        if crop_files:
-                            n_show = min(12, len(crop_files))
-                            sample = crop_files[::max(1, len(crop_files) // n_show)][:n_show]
-                            cols = st.columns(4)
-                            for i, cf in enumerate(sample):
-                                with cols[i % 4]:
-                                    st.image(cf, caption=os.path.basename(cf),
-                                             use_container_width=True)
+
+                progress_bar.progress(1.0)
+                status_text.empty()
+
+                if deploy_result and "error" not in deploy_result:
+                    st.success(
+                        f"Done! Classified **{deploy_result['total_relabeled']}** "
+                        f"crops. Features written to `data/vision_features/`."
+                    )
+                    if deploy_result.get("conditions"):
+                        rows = []
+                        for cs in deploy_result["conditions"]:
+                            rows.append({
+                                "Subject": f"sj{cs['sj_num']:02d}",
+                                "Condition": cs["condition"],
+                                "Crops": cs["n_crops"],
+                            })
+                        st.dataframe(
+                            pd.DataFrame(rows), hide_index=True,
+                            use_container_width=True,
+                        )
+                    st.cache_data.clear()
+                elif deploy_result and deploy_result.get("error"):
+                    st.error(f"Deploy failed: {deploy_result['error']}")
+                else:
+                    st.error("Deploy failed. Check console for details.")
