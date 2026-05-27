@@ -30,6 +30,7 @@ from plotly.subplots import make_subplots
 
 import et_viz
 from pipeline_progress import read_progress, clear_progress
+from vision.config import CATEGORY_COLORS, LABEL_MERGE_MAP
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
@@ -587,6 +588,50 @@ def _build_analysis_df(rn, subjects_tuple, conds_tuple):
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+@st.cache_data(ttl=120)
+def _build_gaze_time_proportions(rn, subjects_tuple, conds_tuple, bin_size=30):
+    cat_order = [c for c in CATEGORY_COLORS]
+    walk_conds = [c for c in conds_tuple if c.startswith("walk_")]
+    result = {}
+    for cond in walk_conds:
+        per_subject = []
+        for sj in subjects_tuple:
+            vdir = vision_dir(rn, sj, cond)
+            path = os.path.join(vdir, f"sj{sj:02d}_{cond}_vision_results.csv")
+            if not os.path.exists(path):
+                continue
+            df = pd.read_csv(path)
+            if "timestamp_s" not in df.columns or "gaze_target_category" not in df.columns:
+                continue
+            df["gaze_target_category"] = df["gaze_target_category"].replace(LABEL_MERGE_MAP)
+            df["rel_time_s"] = df["timestamp_s"] - df["timestamp_s"].min()
+            max_t = df["rel_time_s"].max()
+            bins = np.arange(0, max_t + bin_size, bin_size)
+            df["time_bin"] = pd.cut(
+                df["rel_time_s"], bins=bins, labels=bins[:-1], include_lowest=True,
+            )
+            props = pd.DataFrame(index=bins[:-1], columns=cat_order, data=0.0)
+            for b in bins[:-1]:
+                subset = df[df["time_bin"] == b]
+                if len(subset) == 0:
+                    continue
+                counts = subset["gaze_target_category"].value_counts()
+                for c in cat_order:
+                    props.loc[b, c] = counts.get(c, 0) / len(subset)
+            per_subject.append(props)
+        if per_subject:
+            stacked = np.stack([p.values.astype(float) for p in per_subject])
+            mean_props = pd.DataFrame(
+                stacked.mean(axis=0),
+                index=per_subject[0].index,
+                columns=cat_order,
+            )
+            n_bins = min(len(p) for p in per_subject)
+            mean_props = mean_props.iloc[:n_bins]
+            result[cond] = mean_props
+    return result
 
 
 def _plot_alpha_by_category(df, group_col, group_order=None, title_prefix=""):
@@ -2798,3 +2843,58 @@ with tab_analysis:
                                 use_container_width=True,
                                 hide_index=True,
                             )
+
+            st.markdown("---")
+
+            # ── Section 4: Gaze Category Distribution Over Time ──
+            st.subheader("Gaze Category Distribution Over Time")
+
+            gaze_props = _build_gaze_time_proportions(
+                selected_run, an_subjects, an_conds,
+            )
+            if not gaze_props:
+                st.info(
+                    "No walking-condition vision results found. "
+                    "Run the CLIP vision pipeline first."
+                )
+            else:
+                cat_order = list(CATEGORY_COLORS.keys())
+                colors_list = list(CATEGORY_COLORS.values())
+                n_panels = len(gaze_props)
+                fig_gaze, axes = plt.subplots(
+                    1, n_panels,
+                    figsize=(8 * n_panels, 4.5),
+                    constrained_layout=True,
+                    squeeze=False,
+                )
+                cond_labels = {
+                    "walk_attend": "Attend Walk",
+                    "walk_unattend": "Unattend Walk",
+                }
+                for idx, (cond, props_df) in enumerate(
+                    sorted(gaze_props.items())
+                ):
+                    ax = axes[0, idx]
+                    t = props_df.index.astype(float)
+                    ax.stackplot(
+                        t,
+                        *[props_df[c].values.astype(float) for c in cat_order],
+                        labels=cat_order,
+                        colors=colors_list,
+                        alpha=0.8,
+                    )
+                    label = cond_labels.get(cond, cond)
+                    ax.set_title(
+                        f"{label} — Category Distribution (30s bins)",
+                        fontsize=13,
+                    )
+                    ax.set_xlabel("Time (s)")
+                    ax.set_ylabel("Proportion")
+                    ax.set_ylim(0, 1)
+                    ax.grid(axis="y", alpha=0.2)
+
+                axes[0, 0].legend(
+                    loc="upper left", fontsize=8, framealpha=0.8,
+                )
+                st.pyplot(fig_gaze, use_container_width=True)
+                plt.close(fig_gaze)
