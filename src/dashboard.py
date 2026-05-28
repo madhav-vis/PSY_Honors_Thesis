@@ -2103,141 +2103,131 @@ with tab_nogo:
             else:
                 st.info("Phase 7 not yet run.")
 
-            # ── ERP: CR vs FA ──
-            st.markdown("---")
-            st.subheader("ERP: Correct Rejection vs False Alarm")
+            # ── Filter Visualization (live from model weights) ──
+            _model_path = os.path.join(
+                run_dir(selected_run), "models", "nogo_eeg_best.pt")
+            _fif_path = None
+            for _cond in conditions:
+                _candidate = os.path.join(
+                    data_dir(selected_run),
+                    f"sj{sj_num:02d}_{_cond}_Features-epo.fif")
+                if os.path.exists(_candidate):
+                    _fif_path = _candidate
+                    break
 
-            for cond in conditions:
-                try:
-                    epo_path = os.path.join(
-                        data_dir(selected_run),
-                        f"sj{sj_num:02d}_{cond}_Features-epo.fif")
-                    if not os.path.exists(epo_path):
-                        continue
-                    ep = _load_epochs_cached(epo_path)
-                    meta = _cached_metadata(ep)
-                    if meta is None:
-                        continue
-                    if "outcome" not in meta.columns:
-                        continue
-
-                    cr_idx = meta[
-                        meta["outcome"].str.upper() == "CORRECT_REJECTION"
-                    ].index.tolist()
-                    fa_idx = meta[
-                        meta["outcome"].str.upper() == "COMMISSION_ERROR"
-                    ].index.tolist()
-
-                    if not cr_idx and not fa_idx:
-                        continue
-
-                    pz_i = None
-                    for ch in ["Pz", "CPz", "Cz"]:
-                        if ch in ep["ch_names"]:
-                            pz_i = ep["ch_names"].index(ch)
-                            break
-                    if pz_i is None:
-                        pz_i = 0
-
-                    edata = ep["data"]
-                    times = ep["times"] * 1000
-                    import plotly.graph_objects as _pgo2
-
-                    fig_erp = _pgo2.Figure()
-                    if cr_idx:
-                        fig_erp.add_trace(_pgo2.Scatter(
-                            x=times,
-                            y=edata[cr_idx, pz_i, :].mean(0) * 1e6,
-                            name=f"CR (n={len(cr_idx)})",
-                            line=dict(color="#3498db"),
-                        ))
-                    if fa_idx:
-                        fig_erp.add_trace(_pgo2.Scatter(
-                            x=times,
-                            y=edata[fa_idx, pz_i, :].mean(0) * 1e6,
-                            name=f"FA (n={len(fa_idx)})",
-                            line=dict(color="#e74c3c"),
-                        ))
-                    fig_erp.add_vrect(x0=180, x1=350, fillcolor="yellow",
-                                      opacity=0.1, line_width=0,
-                                      annotation_text="N2/P3")
-                    fig_erp.add_vline(x=0, line_dash="dash",
-                                      line_color="gray")
-                    fig_erp.update_layout(
-                        title=f"{cond} — {ep['ch_names'][pz_i]}",
-                        xaxis_title="Time (ms)",
-                        yaxis_title="Amplitude (µV)",
-                        height=350, template="plotly_white",
-                    )
-                    st.plotly_chart(fig_erp, width="stretch")
-                except Exception:
-                    pass
-
-            # ── UMAP Embeddings ──
-            models_dir = os.path.join(run_dir(selected_run), "models")
-            emb_path = os.path.join(models_dir, "nogo_eeg_embeddings.npy")
-            lab_path = os.path.join(models_dir,
-                                     "nogo_eeg_embedding_labels.npy")
-
-            if os.path.exists(emb_path) and os.path.exists(lab_path):
-                st.markdown("---")
-                st.subheader("Embedding Explorer (UMAP)")
-
-                emb = np.load(emb_path)
-                emb_labels = np.load(lab_path)
-
-                try:
-                    from umap import UMAP as _UMAP
-
-                    @st.cache_data
-                    def _compute_umap(_emb_bytes, n_pts):
-                        _emb = np.frombuffer(_emb_bytes,
-                                             dtype=np.float32).reshape(n_pts, -1)
-                        return _UMAP(n_neighbors=15, min_dist=0.1,
-                                     n_components=2,
-                                     random_state=42).fit_transform(_emb)
-
-                    coords = _compute_umap(emb.tobytes(), len(emb))
-
-                    umap_df = pd.DataFrame({
-                        "UMAP1": coords[:, 0],
-                        "UMAP2": coords[:, 1],
-                        "Label": ["CR" if l == 1 else "FA"
-                                   for l in emb_labels],
-                    })
-                    fig_umap = px.scatter(
-                        umap_df, x="UMAP1", y="UMAP2", color="Label",
-                        color_discrete_map={"CR": "#3498db", "FA": "#e74c3c"},
-                        opacity=0.7,
-                    )
-                    fig_umap.update_layout(
-                        height=500, template="plotly_white",
-                        title="EEG Embeddings (No-Go Trials)",
-                    )
-                    fig_umap.update_traces(marker=dict(size=6))
-                    st.plotly_chart(fig_umap, width="stretch")
-                except ImportError:
-                    st.warning("Install umap-learn for embedding plots: "
-                               "pip install umap-learn")
-
-            # ── Filter Visualization ──
-            filter_dir = os.path.join(run_dir(selected_run), "plots", "filters")
-            filter_images = {
-                "Spatial Filters (Topomap)": "spatial_filters_topomap.png",
-                "Temporal Filters": "temporal_filters.png",
-                "Input Saliency": "saliency_topomap_class1.png",
-            }
-            has_filters = any(
-                os.path.exists(os.path.join(filter_dir, fn))
-                for fn in filter_images.values()
-            )
-            if has_filters:
+            if os.path.exists(_model_path) and _fif_path:
                 st.markdown("---")
                 st.subheader("Model Interpretability")
-                for title, fname in filter_images.items():
-                    fpath = os.path.join(filter_dir, fname)
-                    if os.path.exists(fpath):
-                        st.image(fpath, caption=title, use_container_width=True)
+                st.caption("Learned EEGNet filters extracted from best Phase 6 model weights.")
+
+                try:
+                    import torch
+                    import matplotlib
+                    matplotlib.use("Agg")
+
+                    _model_cfg_path = os.path.join(
+                        PROJECT_ROOT, "configs", "config.yaml")
+                    _mcfg = {}
+                    if os.path.exists(_model_cfg_path):
+                        with open(_model_cfg_path) as _f:
+                            _mcfg = yaml.safe_load(_f) or {}
+                    _ec = _mcfg.get("model", {}).get("eegnet", {})
+                    _ekw = {
+                        "F1": _ec.get("F1", 8),
+                        "D": _ec.get("D", 2),
+                        "F2": _ec.get("F2", 16),
+                        "dropout": _ec.get("dropout", 0.25),
+                        "kernel_length": _ec.get("kernel_length", 64),
+                        "sep_kernel_length": _ec.get("sep_kernel_length", 16),
+                        "use_transformer": _ec.get("use_transformer", False),
+                        "n_heads": _ec.get("transformer_heads", 2),
+                        "transformer_dropout": _ec.get("transformer_dropout", 0.1),
+                    }
+
+                    _epochs_info = mne.read_epochs(
+                        _fif_path, preload=False, verbose=False)
+                    _n_ch = len(_epochs_info.info["ch_names"])
+                    _n_t = len(_epochs_info.times)
+                    _sfreq = _epochs_info.info["sfreq"]
+
+                    from train import EEGNet as _EEGNet
+                    _viz_model = _EEGNet(_n_ch, _n_t, 2, **_ekw)
+                    _viz_model.load_state_dict(
+                        torch.load(_model_path, map_location="cpu",
+                                   weights_only=True))
+                    _viz_model.eval()
+
+                    # Spatial filters (depthwise conv → scalp topomaps)
+                    _sw = _viz_model.block1[2].weight.detach().cpu().numpy()
+                    _sw = _sw.squeeze()
+                    _n_sf = _sw.shape[0]
+
+                    _sf_cols = min(_n_sf, 4)
+                    _sf_rows = (_n_sf + _sf_cols - 1) // _sf_cols
+                    _fig_sf, _ax_sf = plt.subplots(
+                        _sf_rows, _sf_cols,
+                        figsize=(3 * _sf_cols, 3 * _sf_rows))
+                    if _n_sf == 1:
+                        _ax_sf = np.array([_ax_sf])
+                    _ax_sf = np.array(_ax_sf).flatten()
+
+                    for _i in range(_n_sf):
+                        mne.viz.plot_topomap(
+                            _sw[_i], _epochs_info.info,
+                            axes=_ax_sf[_i], show=False)
+                        _ax_sf[_i].set_title(f"Filter {_i+1}")
+                    for _i in range(_n_sf, len(_ax_sf)):
+                        _ax_sf[_i].set_visible(False)
+                    _fig_sf.suptitle(
+                        "Spatial Filters (Depthwise Conv)", y=1.02)
+                    _fig_sf.tight_layout()
+                    st.pyplot(_fig_sf, use_container_width=True)
+                    plt.close(_fig_sf)
+
+                    # Temporal filters (first conv → waveforms + FFT)
+                    _tw = _viz_model.block1[0].weight.detach().cpu().numpy()
+                    _tw = _tw.squeeze()
+                    if _tw.ndim == 1:
+                        _tw = _tw[np.newaxis, :]
+                    _n_tf, _klen = _tw.shape
+                    _time_ms = np.arange(_klen) / _sfreq * 1000
+
+                    _tf_cols = min(_n_tf, 4)
+                    _tf_rows = (_n_tf + _tf_cols - 1) // _tf_cols
+                    _fig_tf, _ax_tf = plt.subplots(
+                        _tf_rows, _tf_cols,
+                        figsize=(4 * _tf_cols, 3 * _tf_rows))
+                    if _n_tf == 1:
+                        _ax_tf = np.array([_ax_tf])
+                    _ax_tf = np.array(_ax_tf).flatten()
+
+                    for _i in range(_n_tf):
+                        _ax = _ax_tf[_i]
+                        _ax.plot(_time_ms, _tw[_i], "b-", linewidth=1.2)
+                        _ax.set_xlabel("Time (ms)")
+                        _ax.set_ylabel("Weight")
+                        _ax.set_title(f"Temporal Filter {_i+1}")
+                        _fft_vals = np.abs(np.fft.rfft(_tw[_i]))
+                        _freqs = np.fft.rfftfreq(_klen, d=1.0 / _sfreq)
+                        _inset = _ax.inset_axes([0.55, 0.55, 0.4, 0.4])
+                        _inset.plot(_freqs, _fft_vals, "r-", linewidth=0.8)
+                        _inset.set_xlim(0, _sfreq / 2)
+                        _inset.set_xlabel("Hz", fontsize=7)
+                        _inset.set_ylabel("|FFT|", fontsize=7)
+                        _inset.tick_params(labelsize=6)
+                        _peak = _freqs[np.argmax(_fft_vals[1:]) + 1]
+                        _inset.axvline(_peak, color="gray", ls="--", lw=0.5)
+                        _inset.set_title(f"Peak: {_peak:.1f} Hz", fontsize=7)
+                    for _i in range(_n_tf, len(_ax_tf)):
+                        _ax_tf[_i].set_visible(False)
+                    _fig_tf.suptitle(
+                        "Temporal Filters (1st Conv Layer)", y=1.02)
+                    _fig_tf.tight_layout()
+                    st.pyplot(_fig_tf, use_container_width=True)
+                    plt.close(_fig_tf)
+
+                except Exception as _e:
+                    st.warning(f"Could not render filter plots: {_e}")
 
             # ── LOSO Results ──
             loso_path = os.path.join(run_dir(selected_run), "loso_results.json")
@@ -2337,18 +2327,10 @@ with tab_nogo:
 # ════════════════════════════════════════════════════════════
 
 with tab_eval:
-    st.header("Model Evaluation")
-    st.caption("Vision pipeline comparison & EEG LOSO cross-validation")
+    st.header("EEG Evaluation")
+    st.caption("EEG LOSO cross-validation results")
 
     EVAL_RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
-
-    # ── Cached results loader ───────────────────────────────
-    def _load_cached_vision():
-        p = os.path.join(EVAL_RESULTS_DIR, "vision_comparison.json")
-        if os.path.exists(p):
-            with open(p) as f:
-                return json.load(f)
-        return None
 
     def _load_cached_eeg():
         p = os.path.join(EVAL_RESULTS_DIR, "eeg_loso_comparison.json")
@@ -2357,17 +2339,7 @@ with tab_eval:
                 return json.load(f)
         return None
 
-    # ── Controls ────────────────────────────────────────────
-    ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([1, 1, 1])
-    with ctrl_c1:
-        run_vision = st.checkbox("Vision Comparison", value=True)
-    with ctrl_c2:
-        run_eeg = st.checkbox("EEG LOSO Comparison", value=True)
-    with ctrl_c3:
-        n_repeats = st.number_input("CV repeats (vision)", min_value=1,
-                                    max_value=20, value=5, step=1)
-
-    run_eval = st.button("Run Evaluation", type="primary",
+    run_eval = st.button("Run EEG Evaluation", type="primary",
                          use_container_width=True)
 
     if run_eval:
@@ -2381,178 +2353,19 @@ with tab_eval:
             progress_bar.progress(min(step / max(total, 1), 1.0))
             status_text.text(f"Step {step}/{total}: {msg}")
 
-        with st.spinner("Running evaluation..."):
+        with st.spinner("Running EEG evaluation..."):
             res = eval_mod.run_full_evaluation(
-                vision=run_vision, eeg=run_eeg,
-                n_repeats=n_repeats, progress_cb=_progress_cb,
+                vision=False, eeg=True,
+                n_repeats=1, progress_cb=_progress_cb,
             )
 
         progress_bar.progress(1.0)
         status_text.text("Done!")
 
-        if run_vision and "vision" in res:
-            st.session_state["eval_vision"] = res["vision"]
-        if run_eeg and "eeg" in res:
+        if "eeg" in res:
             st.session_state["eval_eeg"] = res["eeg"]
 
-    # ── Load from cache / session ───────────────────────────
-    vision_result = st.session_state.get("eval_vision") or _load_cached_vision()
     eeg_result = st.session_state.get("eval_eeg") or _load_cached_eeg()
-
-    # ═══════════════════════════════════════════════════
-    #  VISION RESULTS
-    # ═══════════════════════════════════════════════════
-
-    if vision_result and "summary" in vision_result and "error" not in vision_result:
-        st.subheader("Vision Pipeline Comparison")
-
-        summary = vision_result["summary"]
-        label_names = vision_result.get("label_names", [])
-        best_model = summary.get("best_model")
-
-        model_display = {
-            "clip_zeroshot": "Zero-shot CLIP",
-            "clip_head": "Trained CLIP Head",
-            "resnet50": "Fine-tuned ResNet-50",
-        }
-
-        if best_model:
-            st.success(f"Best model (by Macro F1): **{model_display.get(best_model, best_model)}** "
-                       f"— Macro F1 = {summary[best_model]['macro_f1_mean']:.3f} "
-                       f"± {summary[best_model]['macro_f1_std']:.3f}")
-
-        # Comparison table
-        comp_rows = []
-        for key in ["clip_zeroshot", "clip_head", "resnet50"]:
-            s = summary.get(key)
-            if not s:
-                continue
-            comp_rows.append({
-                "Method": model_display.get(key, key),
-                "Macro R": f"{s['macro_recall_mean']:.3f} ± {s['macro_recall_std']:.3f}",
-                "Macro P": f"{s['macro_precision_mean']:.3f} ± {s['macro_precision_std']:.3f}",
-                "Macro F1": f"{s['macro_f1_mean']:.3f} ± {s['macro_f1_std']:.3f}",
-                "Weighted F1": f"{s['weighted_f1_mean']:.3f} ± {s['weighted_f1_std']:.3f}",
-                "Accuracy": f"{s['accuracy_mean']:.3f} ± {s['accuracy_std']:.3f}",
-            })
-        if comp_rows:
-            st.dataframe(pd.DataFrame(comp_rows), use_container_width=True,
-                         hide_index=True)
-
-        # Label distribution
-        label_dist = vision_result.get("label_dist")
-        if label_dist:
-            with st.expander("Label distribution"):
-                dist_df = pd.DataFrame([
-                    {"Category": k, "Count": v}
-                    for k, v in label_dist.items()
-                ])
-                st.dataframe(dist_df, hide_index=True)
-
-        # Confusion matrices side by side
-        st.markdown("#### Confusion Matrices (aggregate)")
-        cm_models = [k for k in ["clip_zeroshot", "clip_head", "resnet50"]
-                     if k in summary and "confusion_matrix" in summary[k]]
-        if cm_models and label_names:
-            sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
-            import evaluate as eval_mod
-
-            cols = st.columns(len(cm_models))
-            for i, mk in enumerate(cm_models):
-                with cols[i]:
-                    fig = eval_mod.make_cm_figure(
-                        summary[mk]["confusion_matrix"],
-                        label_names,
-                        title=model_display.get(mk, mk),
-                    )
-                    st.pyplot(fig, use_container_width=True)
-                    plt.close(fig)
-
-        # Relabel button
-        if best_model:
-            st.markdown("---")
-            st.markdown("#### Relabel Unlabeled Crops with Best Model")
-            st.info(
-                f"Classifies only crops **without** a human label in "
-                f"`data/human_labels.csv` using "
-                f"**{model_display.get(best_model, best_model)}**. "
-                f"Human labels are preserved in the fusion CSVs."
-            )
-
-            if st.button("Relabel Unlabeled Crops", type="secondary"):
-                sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
-                import evaluate as eval_mod
-
-                relabel_bar = st.progress(0.0)
-                relabel_status = st.empty()
-
-                def _relabel_cb(step, total, msg):
-                    relabel_bar.progress(min(step / max(total, 1), 1.0))
-                    relabel_status.text(f"{msg} ({step}/{total})")
-
-                with st.spinner("Relabeling unlabeled crops..."):
-                    relabel_res = eval_mod.relabel_crops_with_best(
-                        best_model,
-                        progress_cb=_relabel_cb,
-                        only_unlabeled=True,
-                    )
-
-                relabel_bar.progress(1.0)
-                if relabel_res.get("error"):
-                    st.error(f"Relabeling failed: {relabel_res['error']}")
-                else:
-                    n_relabeled = relabel_res.get("total_relabeled", 0)
-                    n_skip = relabel_res.get("total_skipped_human_labeled", 0)
-                    st.success(
-                        f"Model classified {n_relabeled} crop(s)"
-                        + (f" ({n_skip} human-labeled skipped)." if n_skip else ".")
-                        + " Fusion CSVs regenerated."
-                    )
-                    cats = relabel_res.get("category_counts", {})
-                    if cats:
-                        st.dataframe(
-                            pd.DataFrame([{"Category": k, "Count": v}
-                                          for k, v in cats.items()]),
-                            hide_index=True,
-                        )
-
-        # LaTeX export
-        with st.expander("LaTeX source (vision)"):
-            tex_path = os.path.join(EVAL_RESULTS_DIR,
-                                    "table_vision_comparison.tex")
-            if os.path.exists(tex_path):
-                with open(tex_path) as f:
-                    st.code(f.read(), language="latex")
-            else:
-                st.caption("Run evaluation to generate LaTeX.")
-
-        # Download buttons
-        dl_c1, dl_c2, dl_c3 = st.columns(3)
-        csv_path = os.path.join(EVAL_RESULTS_DIR,
-                                "table_vision_comparison.csv")
-        if os.path.exists(csv_path):
-            with open(csv_path) as f:
-                dl_c1.download_button("Download CSV", f.read(),
-                                      "vision_comparison.csv", "text/csv")
-        tex_path = os.path.join(EVAL_RESULTS_DIR,
-                                "table_vision_comparison.tex")
-        if os.path.exists(tex_path):
-            with open(tex_path) as f:
-                dl_c2.download_button("Download LaTeX", f.read(),
-                                      "vision_comparison.tex", "text/plain")
-        png_path = os.path.join(EVAL_RESULTS_DIR,
-                                "cm_vision_comparison.png")
-        if os.path.exists(png_path):
-            with open(png_path, "rb") as f:
-                dl_c3.download_button("Download CM (PNG)", f.read(),
-                                      "cm_vision_comparison.png", "image/png")
-
-    elif vision_result and vision_result.get("error"):
-        st.warning(f"Vision evaluation error: {vision_result['error']}")
-
-    # ═══════════════════════════════════════════════════
-    #  EEG LOSO RESULTS
-    # ═══════════════════════════════════════════════════
 
     if eeg_result and "summary" in eeg_result and "error" not in eeg_result:
         st.subheader("EEG LOSO Cross-Validation")
@@ -2685,10 +2498,9 @@ with tab_eval:
     elif eeg_result and eeg_result.get("error"):
         st.warning(f"EEG LOSO error: {eeg_result['error']}")
 
-    # ── No results yet ──────────────────────────────────────
-    if not vision_result and not eeg_result:
-        st.info("No evaluation results found. Click **Run Evaluation** above, "
-                "or run `python src/evaluate.py` from the terminal.")
+    if not eeg_result:
+        st.info("No EEG evaluation results found. Click **Run EEG Evaluation** above, "
+                "or run `python src/evaluate.py --eeg-only` from the terminal.")
 
 
 # ════════════════════════════════════════════════════════════
