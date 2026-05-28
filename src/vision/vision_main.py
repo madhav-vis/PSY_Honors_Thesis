@@ -131,7 +131,9 @@ def _load_best_reclassifier(label_names):
     if os.path.exists(_COMPARISON_JSON):
         try:
             with open(_COMPARISON_JSON) as f:
-                best_name = json.load(f).get("best_model")
+                cmp = json.load(f)
+            # best_model may be at top level or nested under "summary"
+            best_name = cmp.get("best_model") or cmp.get("summary", {}).get("best_model")
         except Exception:
             pass
 
@@ -670,13 +672,76 @@ def _build_fusion_csv(sj_num, label, results_df, run_dir):
     print(f"    Built trial-level features for {len(fusion_df)} trials → {out_path}")
 
 
-def run(run_dir_override=None):
+def _reclassify_only_condition(sj_num, condition, run_dir, world_video_dir=None):
+    """Re-classify existing crops with the best trained model, then regenerate plots.
+
+    Skips crop generation and embedding extraction — reads stable crops directly.
+    Requires that crops already exist in data/crops/sj{N}_{cond}/.
+    """
+    label = condition
+    vision_dir = get_vision_out_dir(run_dir, sj_num, label)
+    results_csv = os.path.join(vision_dir, f"sj{sj_num:02d}_{label}_vision_results.csv")
+
+    if not os.path.exists(results_csv):
+        print(f"    No existing vision_results.csv — cannot reclassify-only. Run full pipeline first.")
+        return None
+
+    stable_crop_dir = get_crop_dir(sj_num, label)
+    crop_files = sorted(f for f in os.listdir(stable_crop_dir) if f.endswith(".png"))
+    if not crop_files:
+        print(f"    No crops in {stable_crop_dir}")
+        return None
+
+    print(f"    Loading {len(crop_files)} crops from stable storage...")
+    crops_rgb = []
+    for cf in crop_files:
+        img = cv2.imread(os.path.join(stable_crop_dir, cf))
+        if img is None:
+            continue
+        crops_rgb.append(img[:, :, ::-1].copy())
+
+    _best = _load_best_reclassifier(list(CATEGORIES.keys()))
+    if _best is None:
+        print("    No trained model found — cannot reclassify.")
+        return None
+
+    print(f"    Reclassifying {len(crops_rgb)} crops...")
+    batch_results = _best.classify_batch(crops_rgb)
+
+    results_df = pd.read_csv(results_csv)
+    for i, res in enumerate(batch_results):
+        if i >= len(results_df):
+            break
+        results_df.loc[i, "gaze_target_category"] = res["label"]
+        results_df.loc[i, "confidence"] = res["confidence"]
+        for cat_label, score in res["all_scores"].items():
+            results_df.loc[i, f"score_{cat_label}"] = score
+    results_df.to_csv(results_csv, index=False)
+    print(f"    Saved -> {results_csv}")
+    print("    Category distribution:")
+    print(results_df["gaze_target_category"].value_counts().to_string(header=False))
+
+    # Ensure local crops symlink exists so visualizer can read crops
+    crops_dir_local = os.path.join(vision_dir, "crops")
+    if not os.path.exists(crops_dir_local):
+        os.symlink(stable_crop_dir, crops_dir_local)
+
+    eye_dir = get_eye_dir(data_root_from_config(), sj_num, label)
+    video_path = get_world_video_path(sj_num, label, world_video_dir)
+    _run_visualizations(sj_num, label, results_df, None,
+                        run_dir, vision_dir, eye_dir, video_path)
+    return results_df
+
+
+def run(run_dir_override=None, reclassify_only=False):
     """Run the vision pipeline.
 
     Args:
         run_dir_override: Absolute path to the run directory.
             If None, uses the most recent run in _PROJECT_ROOT/runs/ (or
             _PROJECT_ROOT/runs/DEFAULT_RUN_ID if DEFAULT_RUN_ID is set).
+        reclassify_only: If True, skip crop generation and CLIP embedding phases;
+            only re-classify existing crops with best trained model and regenerate plots.
     """
     if run_dir_override:
         the_run_dir = run_dir_override
@@ -733,8 +798,13 @@ def run(run_dir_override=None):
             except ImportError:
                 pass
 
-            results_df = _process_condition(sj_num, condition, the_run_dir, classifier,
-                                            world_video_dir=world_video_dir)
+            if reclassify_only:
+                results_df = _reclassify_only_condition(
+                    sj_num, condition, the_run_dir,
+                    world_video_dir=world_video_dir)
+            else:
+                results_df = _process_condition(sj_num, condition, the_run_dir, classifier,
+                                                world_video_dir=world_video_dir)
 
             if results_df is not None and not results_df.empty:
                 top3 = results_df["gaze_target_category"].value_counts().head(3)
@@ -851,5 +921,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Gaze-contingent scene classification")
     parser.add_argument("--run-dir", default=None,
                         help="Absolute path to the run directory")
+    parser.add_argument("--reclassify-only", action="store_true",
+                        help="Skip crop/embedding phases; re-classify existing crops "
+                             "with best trained model and regenerate plots only")
     args = parser.parse_args()
-    run(run_dir_override=args.run_dir)
+    run(run_dir_override=args.run_dir, reclassify_only=args.reclassify_only)
