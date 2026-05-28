@@ -52,6 +52,11 @@ FILTER_HIGH = _eeg["filter_high"]
 REF_CHANNELS = _eeg["reference_channels"]
 BAD_CHAN_Z_THRESH = _eeg["bad_channel_z_thresh"]
 DETECT_BAD_CHANNELS = _eeg.get("detect_bad_channels", True)
+# {sj_num: [chan, ...]} — channels guaranteed bad regardless of z-score
+MANUAL_BAD_CHANNELS: dict = {
+    int(k): list(v)
+    for k, v in _eeg.get("manual_bad_channels", {}).items()
+}
 APPLY_ICA = _eeg.get("apply_ica", True)
 ICA_EOG_THRESHOLD = float(_eeg.get("ica_eog_threshold", 2.5))
 ICA_EOG_MEASURE = _eeg.get("ica_eog_measure", "zscore")

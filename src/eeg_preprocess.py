@@ -14,6 +14,7 @@ from config import (
     DETECT_BAD_CHANNELS,
     FILTER_HIGH,
     FILTER_LOW,
+    MANUAL_BAD_CHANNELS,
     GEDAI_STRENGTH,
     ICA_EOG_CHANNELS,
     ICA_EOG_H_FREQ,
@@ -157,23 +158,39 @@ def _preprocess_pre_gedai(sj_num, cond):
     raw.filter(FILTER_LOW, FILTER_HIGH, fir_design="firwin2")
 
     # ── Bad-channel detection (YAML: eeg.detect_bad_channels) ────────
+    # ── Bad-channel detection + manual overrides (single interpolation pass) ──
+    # Manual overrides are added first so they don't inflate the z-score
+    # distribution (two simultaneously bad channels suppress each other's z).
+    all_bad = set(raw.info.get("bads", []))
+
+    manual_bads = MANUAL_BAD_CHANNELS.get(sj_num, [])
+    manual_new = [ch for ch in manual_bads if ch in raw.ch_names]
+    if manual_new:
+        print(f"    Manual bad-channel override for sj{sj_num:02d}: {manual_new}")
+        all_bad.update(manual_new)
+
     if DETECT_BAD_CHANNELS:
-        eeg_picks = mne.pick_types(raw.info, eeg=True, exclude=[])
+        eeg_picks = mne.pick_types(raw.info, eeg=True,
+                                   exclude=list(all_bad))
         if len(eeg_picks) > 0:
             data_eeg = raw.get_data(picks=eeg_picks)
             chan_std = np.std(data_eeg, axis=1)
             z_scores = (chan_std - np.mean(chan_std)) / (np.std(chan_std) + 1e-12)
-            bad_chans = [
+            auto_bad = [
                 raw.ch_names[eeg_picks[i]]
                 for i, z in enumerate(z_scores)
                 if z > BAD_CHAN_Z_THRESH
             ]
-            if bad_chans:
-                print(f"    Marking bad channels (z>{BAD_CHAN_Z_THRESH}): {bad_chans}")
-                raw.info["bads"].extend(bad_chans)
-                raw.interpolate_bads(reset_bads=True)
+            if auto_bad:
+                print(f"    Auto bad channels (z>{BAD_CHAN_Z_THRESH}): {auto_bad}")
+                all_bad.update(auto_bad)
     else:
         print("    Bad-channel detection: disabled (eeg.detect_bad_channels=false)")
+
+    if all_bad:
+        raw.info["bads"] = sorted(all_bad)
+        raw.interpolate_bads(reset_bads=True)
+        print(f"    Interpolated {len(all_bad)} bad channel(s): {sorted(all_bad)}")
 
     return raw, trial_data
 

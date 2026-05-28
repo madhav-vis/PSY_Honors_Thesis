@@ -12,6 +12,10 @@ eeg:
   filter_high: 30.0
   bad_channel_z_thresh: 3.5
   detect_bad_channels: true
+  # Per-subject channel overrides applied before ICA (keys are subject numbers).
+  # Use this when two simultaneously bad channels suppress each other's z-score.
+  manual_bad_channels:
+    12: ["FC6", "T8"]   # dead electrode contacts across all conditions
   apply_ica:  true
   # ICA EOG rejection (MNE find_bads_eog; default threshold there is 3.0)
   ica_eog_threshold: 2.5      # lower = more blink components removed
