@@ -18,7 +18,7 @@ def cluster_embeddings(embeddings, n_clusters=7, random_state=42):
     Returns (cluster_labels, kmeans_model).
     """
     n = len(embeddings)
-    print(f"    K-Means clustering: {n} fixations → {n_clusters} clusters")
+    print(f"    K-Means clustering: {n} fixations -> {n_clusters} clusters")
 
     pca = PCA(n_components=min(50, n, embeddings.shape[1]),
               random_state=random_state)
