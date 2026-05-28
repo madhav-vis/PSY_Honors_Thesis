@@ -44,50 +44,23 @@ PROJECT_ROOT = os.path.dirname(_SRC_DIR)
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
-RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
-RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
+RESULTS_DIR = os.environ.get("PSY197B_RESULTS_DIR") or os.path.join(PROJECT_ROOT, "results")
+RESULTS_DIR = os.path.abspath(RESULTS_DIR)
+RUNS_ROOT = os.environ.get("PSY197B_RUNS_DIR") or os.path.join(PROJECT_ROOT, "runs")
+RUNS_ROOT = os.path.abspath(RUNS_ROOT)
 
 
 # ═══════════════════════════════════════════════════════════
 #  FOCAL LOSS
 # ═══════════════════════════════════════════════════════════
 
-class FocalLoss(nn.Module):
-    """Focal loss for class-imbalanced classification.
+def _make_train_loss(y, n_classes, *, use_sampler: bool = False):
+    """Mild imbalance handling — avoids suppressing trail_ground."""
+    from vision.class_balance import make_classification_loss
 
-    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
-    """
-
-    def __init__(self, alpha=None, gamma=2.0, reduction="mean"):
-        super().__init__()
-        self.gamma = gamma
-        self.reduction = reduction
-        if alpha is not None:
-            if isinstance(alpha, (list, np.ndarray)):
-                alpha = torch.tensor(alpha, dtype=torch.float32)
-            self.register_buffer("alpha", alpha)
-        else:
-            self.alpha = None
-
-    def forward(self, logits, targets):
-        ce = F.cross_entropy(logits, targets, weight=self.alpha,
-                             reduction="none")
-        pt = torch.exp(-ce)
-        focal = ((1 - pt) ** self.gamma) * ce
-        if self.reduction == "mean":
-            return focal.mean()
-        elif self.reduction == "sum":
-            return focal.sum()
-        return focal
-
-
-def _make_focal_loss(y, n_classes, gamma=2.0):
-    """Build FocalLoss with inverse-frequency alpha from label array."""
-    counts = np.bincount(y, minlength=n_classes).astype(np.float32)
-    counts = np.maximum(counts, 1.0)
-    alpha = 1.0 / counts
-    alpha = alpha / alpha.sum() * n_classes
-    return FocalLoss(alpha=torch.from_numpy(alpha), gamma=gamma)
+    return make_classification_loss(
+        y, n_classes, use_sampler=use_sampler, loss_type="ce", max_boost=6.0
+    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -177,9 +150,22 @@ def load_vision_data():
             labels_df = labels_df[matched_mask].reset_index(drop=True)
             print(f"  CLIP embeddings matched: {len(X_clip)}/{sum(matched_mask)}")
         else:
-            print(f"  Only {sum(matched_mask)} embedding matches — CLIP head eval will be skipped")
+            print(f"  Only {sum(matched_mask)} embedding matches — trying crops/cache…")
+            X_clip = None
     else:
-        print("  No CLIP embeddings found — CLIP head eval will be skipped")
+        X_clip = None
+
+    if X_clip is None:
+        print("  No precomputed embeddings in runs/ — encoding from data/crops/ …")
+        from vision.train_models import encode_clip_from_crops
+
+        X_clip, y, _sj, label_names, labels_df = encode_clip_from_crops(
+            labels_df, batch_size=64, use_cache=True,
+        )
+        if X_clip is not None:
+            print(f"  CLIP embeddings ready: {len(X_clip)} samples (cache or fresh encode)")
+        else:
+            print("  CLIP head eval will be skipped")
 
     crop_records = []
     for _, row in labels_df.iterrows():
@@ -284,7 +270,7 @@ def _eval_clip_head(X_clip, y, train_idx, val_idx, test_idx, n_classes,
     X_val = torch.from_numpy(X_clip[val_idx]).to(device)
     y_val = torch.from_numpy(y[val_idx]).long().to(device)
 
-    loss_fn = _make_focal_loss(y[train_idx], n_classes).to(device)
+    loss_fn = _make_train_loss(y[train_idx], n_classes, use_sampler=False).to(device)
 
     model = LinearHead(n_classes).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-3)
@@ -338,12 +324,10 @@ def _eval_resnet(crop_records, y, train_idx, val_idx, test_idx,
     val_records = [crop_records[i] for i in val_idx]
     test_records = [crop_records[i] for i in test_idx]
 
-    loss_fn = _make_focal_loss(y[train_idx], n_classes)
-
     model, stats = train_resnet(
         train_records, val_records, label_names,
         n_epochs=n_epochs, lr=lr, batch_size=batch_size,
-        loss_fn=loss_fn,
+        loss_fn=None,
     )
 
     _eval_device = _get_eval_device()
@@ -396,12 +380,24 @@ def _get_eval_device():
     return torch.device("cpu")
 
 
-def evaluate_vision_models(n_repeats=5, seed=42, progress_cb=None):
+def evaluate_vision_models(
+    n_repeats=5, seed=42, progress_cb=None,
+    resnet_epochs=30, resnet_batch_size=64,
+):
     """Compare zero-shot CLIP, trained CLIP head, and ResNet-50.
 
     Returns dict with per-model results, comparison table data, and
     confusion matrices.
     """
+    from device_utils import dataloader_workers, device_summary, print_device_banner
+
+    print_device_banner(prefix="  ")
+    _nw = dataloader_workers()
+    print(
+        f"  ResNet eval: batch_size={resnet_batch_size}, epochs={resnet_epochs}, "
+        f"DataLoader workers={_nw} (RAM-capped on Windows; set PSY_DATALOADER_WORKERS to override)"
+    )
+
     data = load_vision_data()
     if data is None:
         return {"error": "insufficient_data"}
@@ -469,8 +465,10 @@ def evaluate_vision_models(n_repeats=5, seed=42, progress_cb=None):
             step += 1
             progress_cb(step, total_steps, "ResNet-50")
         print("    ResNet-50...")
-        rn_preds = _eval_resnet(crop_records, y, train_idx, val_idx,
-                                test_idx, label_names)
+        rn_preds = _eval_resnet(
+            crop_records, y, train_idx, val_idx, test_idx, label_names,
+            n_epochs=resnet_epochs, batch_size=resnet_batch_size,
+        )
         rn_metrics = _eval_metrics(test_y, rn_preds, n_classes, label_names)
         model_results["resnet50"].append(rn_metrics)
         aggregate_cms["resnet50"] += np.array(rn_metrics["confusion_matrix"])
@@ -770,10 +768,59 @@ def evaluate_eeg_loso(run_dirs=None, progress_cb=None):
 #  RELABEL CROPS WITH BEST MODEL
 # ═══════════════════════════════════════════════════════════
 
+def _human_label_rows_for_condition(sj_num, condition, label_names):
+    """Fixation-level rows from human_labels.csv (confidence=1)."""
+    from vision.label_store import load_trainable_labels
+
+    df = load_trainable_labels()
+    if df.empty:
+        return []
+    sub = df[
+        (df["subject_id"] == int(sj_num)) & (df["condition"] == condition)
+    ]
+    records = []
+    for row in sub.itertuples(index=False):
+        label = str(row.human_label)
+        if label not in label_names:
+            continue
+        scores = {n: 0.0 for n in label_names}
+        scores[label] = 1.0
+        records.append({
+            "fixation_id": int(row.fixation_id),
+            "timestamp_ns": int(row.timestamp_ns) if row.timestamp_ns else 0,
+            "gaze_target_category": label,
+            "confidence": 1.0,
+            **{f"score_{n}": scores[n] for n in label_names},
+        })
+    return records
+
+
+def _merge_vision_results(existing_df, new_df, human_df, label_names):
+    """Combine prior CSV, new model preds, and human labels (human wins)."""
+    parts = []
+    if existing_df is not None and not existing_df.empty:
+        parts.append(existing_df.copy())
+    if new_df is not None and not new_df.empty:
+        parts.append(new_df.copy())
+    if human_df is not None and not human_df.empty:
+        parts.append(human_df.copy())
+
+    if not parts:
+        return pd.DataFrame()
+
+    merged = pd.concat(parts, ignore_index=True)
+    if "fixation_id" not in merged.columns:
+        return merged
+
+    # Last row wins per fixation: human rows appended last in caller order.
+    merged = merged.drop_duplicates(subset=["fixation_id"], keep="last")
+    return merged.sort_values("fixation_id").reset_index(drop=True)
+
+
 def relabel_crops_with_best(best_model_name, run_name=None,
-                            progress_cb=None, output_dir=None):
-    """Relabel ALL crops with the best vision model and regenerate
-    fusion features for the EEG pipeline.
+                            progress_cb=None, output_dir=None,
+                            only_unlabeled=True):
+    """Classify gaze crops with the best vision model and regenerate fusion features.
 
     Args:
         best_model_name: "clip_head" or "resnet50"
@@ -781,11 +828,14 @@ def relabel_crops_with_best(best_model_name, run_name=None,
             output_dir is provided.
         output_dir: standalone output directory for results and features.
             If provided, writes all CSVs here instead of into a run.
+        only_unlabeled: if True (default), skip crops that already have a
+            trainable human label in data/human_labels.csv. Human labels
+            are always written into the results CSV for trial aggregation.
 
     Returns dict with relabeling summary.
     """
     from vision.config import CATEGORIES
-    from vision.label_store import CROPS_BASE
+    from vision.label_store import CROPS_BASE, trainable_labeled_crop_keys
 
     label_names = list(CATEGORIES.keys())
 
@@ -838,7 +888,9 @@ def relabel_crops_with_best(best_model_name, run_name=None,
     import cv2
     from scipy.stats import entropy as sp_entropy
 
+    labeled_keys = trainable_labeled_crop_keys() if only_unlabeled else set()
     total_relabeled = 0
+    total_skipped_human = 0
     condition_summaries = []
 
     crop_dirs = []
@@ -862,10 +914,22 @@ def relabel_crops_with_best(best_model_name, run_name=None,
             continue
 
         crop_path = os.path.join(CROPS_BASE, crop_dir_name)
-        crop_files = sorted(f for f in os.listdir(crop_path)
-                            if f.endswith(".png"))
-        if not crop_files:
+        all_crop_files = sorted(f for f in os.listdir(crop_path)
+                                if f.endswith(".png"))
+        if not all_crop_files:
             continue
+
+        if only_unlabeled:
+            crop_files = [
+                cf for cf in all_crop_files
+                if (sj_num, condition, cf) not in labeled_keys
+            ]
+            n_skip = len(all_crop_files) - len(crop_files)
+            total_skipped_human += n_skip
+            if n_skip:
+                print(f"    {crop_dir_name}: skip {n_skip} human-labeled crop(s)")
+        else:
+            crop_files = all_crop_files
 
         crops_rgb = []
         crop_meta = []
@@ -880,10 +944,7 @@ def relabel_crops_with_best(best_model_name, run_name=None,
                 "timestamp_ns": int(fparts[1]),
             })
 
-        if not crops_rgb:
-            continue
-
-        if use_resnet:
+        if use_resnet and crops_rgb:
             from PIL import Image as PILImage
             preds = []
             for crop in crops_rgb:
@@ -899,9 +960,11 @@ def relabel_crops_with_best(best_model_name, run_name=None,
                     "all_scores": {n: float(p)
                                    for n, p in zip(label_names, probs)},
                 })
-        else:
+        elif crops_rgb:
             batch_results = classifier.classify_batch(crops_rgb, batch_size=64)
             preds = batch_results
+        else:
+            preds = []
 
         records = []
         for meta_row, res in zip(crop_meta, preds):
@@ -915,9 +978,51 @@ def relabel_crops_with_best(best_model_name, run_name=None,
                 rec[f"score_{cat_label}"] = score
             records.append(rec)
 
-        results_df = pd.DataFrame(records)
+        new_results_df = pd.DataFrame(records)
+        total_relabeled += len(new_results_df)
 
-        if "timestamp_ns" in results_df.columns and "timestamp_s" not in results_df.columns:
+        if output_dir:
+            csv_path = os.path.join(
+                output_dir,
+                f"sj{sj_num:02d}_{condition}_vision_results.csv")
+            feat_path = os.path.join(
+                output_dir,
+                f"sj{sj_num:02d}_{condition}_vision_trial_features.csv")
+            et_path = None
+            existing_df = None
+            if os.path.exists(csv_path):
+                existing_df = pd.read_csv(csv_path)
+        else:
+            vis_dir = os.path.join(vision_root,
+                                   f"sj{sj_num:02d}_{condition}")
+            csv_path = None
+            feat_path = None
+            et_path = None
+            existing_df = None
+            if os.path.isdir(vis_dir):
+                csv_path = os.path.join(
+                    vis_dir,
+                    f"sj{sj_num:02d}_{condition}_vision_results.csv")
+                feat_path = os.path.join(
+                    run_path, "data",
+                    f"sj{sj_num:02d}_{condition}_vision_trial_features.csv")
+                if os.path.exists(csv_path):
+                    existing_df = pd.read_csv(csv_path)
+            data_dir = os.path.join(run_path, "data")
+            et_path = os.path.join(
+                data_dir, f"sj{sj_num:02d}_{condition}_ET_Prepro1.csv")
+
+        human_records = _human_label_rows_for_condition(
+            sj_num, condition, label_names)
+        human_df = pd.DataFrame(human_records)
+
+        results_df = _merge_vision_results(
+            existing_df, new_results_df, human_df, label_names)
+
+        if not results_df.empty and (
+            "timestamp_ns" in results_df.columns
+            and "timestamp_s" not in results_df.columns
+        ):
             try:
                 from vision.config import get_eye_dir, ET_FOLDER_MAP
                 from vision.label_store import data_root_from_config
@@ -936,41 +1041,10 @@ def relabel_crops_with_best(best_model_name, run_name=None,
             except Exception:
                 pass
 
-        total_relabeled += len(results_df)
-
-        if output_dir:
-            csv_path = os.path.join(
-                output_dir,
-                f"sj{sj_num:02d}_{condition}_vision_results.csv")
+        if csv_path and not results_df.empty:
             results_df.to_csv(csv_path, index=False)
-            feat_path = os.path.join(
-                output_dir,
-                f"sj{sj_num:02d}_{condition}_vision_trial_features.csv")
-            et_path = None
-        else:
-            vis_dir = os.path.join(vision_root,
-                                   f"sj{sj_num:02d}_{condition}")
-            if os.path.isdir(vis_dir):
-                csv_path = os.path.join(
-                    vis_dir,
-                    f"sj{sj_num:02d}_{condition}_vision_results.csv")
-                if os.path.exists(csv_path):
-                    old_df = pd.read_csv(csv_path)
-                    keep_cols = [c for c in old_df.columns
-                                 if c not in results_df.columns
-                                 or c == "fixation_id"]
-                    if len(keep_cols) > 1:
-                        merged = results_df.merge(
-                            old_df[keep_cols], on="fixation_id", how="left")
-                        results_df = merged
-                results_df.to_csv(csv_path, index=False)
-
-            data_dir = os.path.join(run_path, "data")
-            et_path = os.path.join(
-                data_dir, f"sj{sj_num:02d}_{condition}_ET_Prepro1.csv")
-            feat_path = os.path.join(
-                data_dir,
-                f"sj{sj_num:02d}_{condition}_vision_trial_features.csv")
+        elif csv_path and results_df.empty and os.path.exists(csv_path):
+            results_df = pd.read_csv(csv_path)
 
         if et_path is None and output_dir and os.path.isdir(RUNS_ROOT):
             for _run in sorted(
@@ -1025,10 +1099,16 @@ def relabel_crops_with_best(best_model_name, run_name=None,
             fusion_df = pd.DataFrame(trial_records)
             fusion_df.to_csv(feat_path, index=False)
 
-        dist = results_df["gaze_target_category"].value_counts().to_dict()
+        if not results_df.empty:
+            dist = results_df["gaze_target_category"].value_counts().to_dict()
+        else:
+            dist = {}
         condition_summaries.append({
             "sj_num": sj_num, "condition": condition,
-            "n_crops": len(results_df), "distribution": dist,
+            "n_crops": len(results_df),
+            "n_model_classified": len(new_results_df),
+            "n_human_labeled": len(human_df),
+            "distribution": dist,
         })
 
     if not use_resnet:
@@ -1040,6 +1120,8 @@ def relabel_crops_with_best(best_model_name, run_name=None,
     return {
         "model": best_model_name,
         "total_relabeled": total_relabeled,
+        "total_skipped_human_labeled": total_skipped_human,
+        "only_unlabeled": only_unlabeled,
         "conditions": condition_summaries,
         "run_name": run_name,
     }
@@ -1453,8 +1535,10 @@ def _save_eeg_tables(result):
 #  ORCHESTRATOR
 # ═══════════════════════════════════════════════════════════
 
-def run_full_evaluation(vision=True, eeg=True, n_repeats=5, seed=42,
-                        progress_cb=None):
+def run_full_evaluation(
+    vision=True, eeg=True, n_repeats=5, seed=42, progress_cb=None,
+    resnet_epochs=30, resnet_batch_size=64,
+):
     """Run the complete evaluation pipeline.
 
     Args:
@@ -1474,7 +1558,9 @@ def run_full_evaluation(vision=True, eeg=True, n_repeats=5, seed=42,
         print("  VISION MODEL COMPARISON")
         print("=" * 60)
         results["vision"] = evaluate_vision_models(
-            n_repeats=n_repeats, seed=seed, progress_cb=progress_cb)
+            n_repeats=n_repeats, seed=seed, progress_cb=progress_cb,
+            resnet_epochs=resnet_epochs, resnet_batch_size=resnet_batch_size,
+        )
 
     if eeg:
         print("\n" + "=" * 60)
@@ -1505,13 +1591,69 @@ def main():
                         help="Number of CV repeats for vision (default: 5)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed (default: 42)")
+    parser.add_argument("--resnet-epochs", type=int, default=30,
+                        help="Epochs per ResNet CV fold (default: 30)")
+    parser.add_argument("--resnet-batch-size", type=int, default=64,
+                        help="ResNet batch size — raise to feed GPU (default: 64)")
+    parser.add_argument(
+        "--dataloader-workers", type=int, default=None,
+        help="Override PSY_DATALOADER_WORKERS (Windows: 2-4 is a good balance)",
+    )
+    parser.add_argument(
+        "--deploy", action="store_true",
+        help="Deploy model on unlabeled crops → data/vision_features/",
+    )
+    parser.add_argument(
+        "--deploy-model", choices=["clip_head", "resnet50"],
+        default="clip_head",
+        help="Model for --deploy (default: clip_head)",
+    )
+    parser.add_argument(
+        "--deploy-output-dir", default=None,
+        help="Output dir for --deploy (default: <project>/data/vision_features)",
+    )
+    parser.add_argument(
+        "--deploy-all-crops", action="store_true",
+        help="With --deploy, reclassify human-labeled crops too (not recommended)",
+    )
     args = parser.parse_args()
+
+    if args.deploy:
+        deploy_out = args.deploy_output_dir or os.path.join(
+            PROJECT_ROOT, "data", "vision_features")
+        os.makedirs(deploy_out, exist_ok=True)
+        print(f"\n  Deploying {args.deploy_model} → {deploy_out}")
+        print(f"  only_unlabeled={not args.deploy_all_crops}\n")
+        result = relabel_crops_with_best(
+            args.deploy_model,
+            output_dir=deploy_out,
+            only_unlabeled=not args.deploy_all_crops,
+        )
+        if result.get("error"):
+            print(f"  ERROR: {result['error']}")
+            raise SystemExit(1)
+        print(f"\n  Model classified: {result.get('total_relabeled', 0)}")
+        print(f"  Human-labeled skipped: {result.get('total_skipped_human_labeled', 0)}")
+        return
+
+    if args.dataloader_workers is not None:
+        os.environ["PSY_DATALOADER_WORKERS"] = str(max(0, args.dataloader_workers))
+        global _COMPUTE_CACHE
+        try:
+            import device_utils
+            device_utils._COMPUTE_CACHE = None
+        except Exception:
+            pass
 
     vision = not args.eeg_only
     eeg = not args.vision_only
 
-    run_full_evaluation(vision=vision, eeg=eeg,
-                        n_repeats=args.n_repeats, seed=args.seed)
+    run_full_evaluation(
+        vision=vision, eeg=eeg,
+        n_repeats=args.n_repeats, seed=args.seed,
+        resnet_epochs=args.resnet_epochs,
+        resnet_batch_size=args.resnet_batch_size,
+    )
 
 
 if __name__ == "__main__":

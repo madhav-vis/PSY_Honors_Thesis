@@ -32,3 +32,10 @@ Thumbs.db
 *.swo
 
 .claude/
+
+# Model weights and embeddings (large binaries — store outside git)
+models/*.pt
+models/*.npz
+
+# Pipeline evaluation outputs
+results/

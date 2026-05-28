@@ -164,8 +164,10 @@ def _windows_commit_budget_workers(default_n: int) -> int:
         return min(default_n, 6)
     per_worker_gb = 2.5
     parent_overhead_gb = 4.0
-    safe_n = max(1, int((avail_gb - parent_overhead_gb) / per_worker_gb))
-    return min(default_n, max(2, safe_n))
+    safe_n = max(0, int((avail_gb - parent_overhead_gb) / per_worker_gb))
+    # 2–4 workers: keeps GPU fed without 8× torch re-import on spawn.
+    capped = min(default_n, max(2, safe_n), 4)
+    return capped if capped >= 1 else 0
 
 
 def dataloader_workers() -> int:

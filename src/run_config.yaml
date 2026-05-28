@@ -1,8 +1,8 @@
-run_name: "sj_17_test"
+run_name: "SJ_ALL_ERP_ICA"
 date: "auto"
 data:
   root: "C:/Users/twbul/OneDrive/Desktop/Subjects_Walking_Outdoors"
-  subjects: [17]
+  subjects: [1,2,3,4,5,6,7,8,9,10,11,13,14,15,16,17,18,19,20]
   world_video_dir:  "C:/Users/twbul/OneDrive/Desktop/Subjects_Walking_Outdoors/worldvideos"
 
 eeg:
@@ -12,8 +12,15 @@ eeg:
   filter_high: 30.0
   bad_channel_z_thresh: 3.5
   detect_bad_channels: true
-  apply_ica: false
-  use_gedai: true
+  apply_ica:  true
+  # ICA EOG rejection (MNE find_bads_eog; default threshold there is 3.0)
+  ica_eog_threshold: 2.5      # lower = more blink components removed
+  ica_eog_measure: zscore       # zscore | correlation
+  ica_eog_channels: ["Fp1", "Fp2", "AF3", "AF4"]
+  ica_eog_l_freq: 1
+  ica_eog_h_freq: 10
+  ica_eog_virtual: true         # mean(Fp1,Fp2,...) as extra VEOG proxy
+  use_gedai:  false
   gedai_strength: "auto+"   # "auto", "auto+" (conservative), "auto-" (aggressive), or a float
   trigger_latency_offset: 36
   tmin: -0.2

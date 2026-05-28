@@ -18,7 +18,9 @@ if RUN_DATE == "auto":
     RUN_DATE = datetime.now().strftime("%Y-%m-%d_%H%M")
 
 # Output directory: runs/<date>_<run_name>/
-RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
+# Override with PSY197B_RUNS_DIR to keep large .fif outputs off OneDrive.
+RUNS_ROOT = os.environ.get("PSY197B_RUNS_DIR") or os.path.join(PROJECT_ROOT, "runs")
+RUNS_ROOT = os.path.abspath(RUNS_ROOT)
 RUN_DIR = os.path.join(RUNS_ROOT, f"{RUN_DATE}_{RUN_NAME}")
 OUTPUT_DATA_DIR = os.path.join(RUN_DIR, "data")
 OUTPUT_PLOT_DIR = os.path.join(RUN_DIR, "plots")
@@ -51,6 +53,13 @@ REF_CHANNELS = _eeg["reference_channels"]
 BAD_CHAN_Z_THRESH = _eeg["bad_channel_z_thresh"]
 DETECT_BAD_CHANNELS = _eeg.get("detect_bad_channels", True)
 APPLY_ICA = _eeg.get("apply_ica", True)
+ICA_EOG_THRESHOLD = float(_eeg.get("ica_eog_threshold", 2.5))
+ICA_EOG_MEASURE = _eeg.get("ica_eog_measure", "zscore")
+ICA_EOG_CHANNELS = _eeg.get(
+    "ica_eog_channels", ["Fp1", "Fp2", "AF3", "AF4"])
+ICA_EOG_L_FREQ = float(_eeg.get("ica_eog_l_freq", 1))
+ICA_EOG_H_FREQ = float(_eeg.get("ica_eog_h_freq", 10))
+ICA_EOG_VIRTUAL = _eeg.get("ica_eog_virtual", True)
 USE_GEDAI = _eeg.get("use_gedai", False)
 GEDAI_STRENGTH = _eeg.get("gedai_strength", "auto")
 TRIGGER_LATENCY_OFFSET = _eeg["trigger_latency_offset"]

@@ -46,7 +46,8 @@ from torch.utils.data import DataLoader, TensorDataset
 warnings.filterwarnings("ignore", category=UserWarning)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
+RUNS_ROOT = os.environ.get("PSY197B_RUNS_DIR") or os.path.join(PROJECT_ROOT, "runs")
+RUNS_ROOT = os.path.abspath(RUNS_ROOT)
 MODEL_CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs", "config.yaml")
 
 

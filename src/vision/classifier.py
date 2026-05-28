@@ -176,3 +176,67 @@ class GazeClassifier:
             all_embs.append(feats.cpu().numpy().astype(np.float32))
 
         return np.concatenate(all_embs, axis=0)
+
+
+class ResNetGazeClassifier:
+    """Fine-tuned ResNet-50 wrapper with the same classify_batch() interface as GazeClassifier.
+
+    Used by vision_main.py when ResNet outperforms the CLIP head on evaluation.
+    Does NOT implement extract_embeddings_batch() — embedding phases always use CLIP.
+    """
+
+    def __init__(self, path, label_names, batch_size=32):
+        from .resnet_head import load_resnet
+        try:
+            from torchvision import transforms
+        except ImportError as e:
+            raise ImportError(
+                "torchvision is required for ResNetGazeClassifier. "
+                "Install with: pip install torchvision"
+            ) from e
+
+        self.model, self.stats = load_resnet(path)
+        self.label_names = label_names
+        self.batch_size = batch_size
+
+        if torch.backends.mps.is_available():
+            self.device = "mps"
+        elif torch.cuda.is_available():
+            self.device = "cuda"
+        else:
+            self.device = "cpu"
+
+        self.model = self.model.to(self.device).eval()
+        self.transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+        print(f"    ResNet classifier loaded from {path} (device={self.device})")
+
+    def classify_batch(self, crops, batch_size=None):
+        """Classify a list of RGB crop arrays using ResNet-50.
+
+        Returns list of dicts with keys: label, confidence, all_scores.
+        Crops must be 224×224 uint8 numpy arrays (RGB).
+        """
+        from PIL import Image
+        bs = batch_size or self.batch_size
+        results = []
+        for start in range(0, len(crops), bs):
+            batch = crops[start : start + bs]
+            imgs = torch.stack([
+                self.transform(Image.fromarray(c))
+                for c in batch
+            ]).to(self.device)
+            with torch.no_grad():
+                probs = self.model(imgs).softmax(dim=-1).cpu().numpy()
+            for p in probs:
+                best = int(np.argmax(p))
+                results.append({
+                    "label": self.label_names[best],
+                    "confidence": float(p[best]),
+                    "all_scores": {n: float(v)
+                                   for n, v in zip(self.label_names, p)},
+                })
+        return results

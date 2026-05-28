@@ -95,6 +95,17 @@ def load_trainable_labels() -> pd.DataFrame:
     ].reset_index(drop=True)
 
 
+def trainable_labeled_crop_keys() -> set[tuple[int, str, str]]:
+    """(subject_id, condition, filename) keys with a human label (not flagged)."""
+    df = load_trainable_labels()
+    if df.empty:
+        return set()
+    return {
+        (int(row.subject_id), str(row.condition), str(row.filename))
+        for row in df.itertuples(index=False)
+    }
+
+
 def load_flagged() -> pd.DataFrame:
     """Return all flagged / ambiguous labels awaiting review."""
     df = load_labels()

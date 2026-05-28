@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.metrics import classification_report, confusion_matrix
 
@@ -176,12 +176,11 @@ def train_resnet(
     train_ds = CropDataset(train_records, transform=train_tfm)
     val_ds = CropDataset(val_records, transform=val_tfm)
 
-    # Class-balanced sampler for training
+    # Balanced minibatches: rare classes seen as often as trail_ground per epoch.
     y_train = [r["label_idx"] for r in train_records]
-    class_counts = np.bincount(y_train, minlength=n_classes).astype(np.float32)
-    class_counts = np.maximum(class_counts, 1.0)
-    sample_weights = [1.0 / class_counts[y] for y in y_train]
-    sampler = WeightedRandomSampler(sample_weights, num_samples=len(y_train), replacement=True)
+    from vision.class_balance import make_weighted_sampler
+
+    sampler = make_weighted_sampler(y_train, n_classes)
 
     _pin = device.type == "cuda"
     from device_utils import (
@@ -210,11 +209,12 @@ def train_resnet(
         model = model.to(memory_format=torch.channels_last)
 
     if loss_fn is None:
-        weights = torch.tensor(1.0 / class_counts, dtype=torch.float32).to(device)
-        weights = weights / weights.sum() * n_classes
-        loss_fn = nn.CrossEntropyLoss(weight=weights)
-    else:
-        loss_fn = loss_fn.to(device)
+        from vision.class_balance import make_classification_loss
+
+        loss_fn = make_classification_loss(
+            y_train, n_classes, use_sampler=True
+        )
+    loss_fn = loss_fn.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
@@ -231,8 +231,11 @@ def train_resnet(
     if _perf_msg:
         print(f"  ResNet perf: {', '.join(_perf_msg)} on {device}")
 
+    from vision.class_balance import balanced_val_accuracy
+
     history = []
     best_val_acc = 0.0
+    best_val_bal_acc = 0.0
     best_state = None
 
     for epoch in range(n_epochs):
@@ -258,7 +261,7 @@ def train_resnet(
         # Validate
         model.eval()
         val_loss = 0.0
-        correct = 0
+        val_preds, val_true = [], []
         with torch.no_grad():
             for imgs, labels in val_loader:
                 imgs = imgs.to(device, non_blocking=_pin)
@@ -269,11 +272,14 @@ def train_resnet(
                     logits = model(imgs)
                     batch_loss = loss_fn(logits, labels)
                 val_loss += batch_loss.item() * len(imgs)
-                correct += (logits.argmax(1) == labels).sum().item()
+                val_preds.extend(logits.argmax(1).cpu().numpy())
+                val_true.extend(labels.cpu().numpy())
         val_loss /= max(len(val_ds), 1)
-        val_acc = correct / max(len(val_ds), 1)
+        val_acc = float(np.mean(np.asarray(val_preds) == np.asarray(val_true)))
+        val_bal_acc = balanced_val_accuracy(val_true, val_preds)
 
-        if val_acc > best_val_acc:
+        if val_bal_acc > best_val_bal_acc:
+            best_val_bal_acc = val_bal_acc
             best_val_acc = val_acc
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
@@ -281,6 +287,7 @@ def train_resnet(
             "train_loss": round(train_loss, 4),
             "val_loss": round(val_loss, 4),
             "val_acc": round(val_acc, 4),
+            "val_bal_acc": round(val_bal_acc, 4),
         }
         history.append({"epoch": epoch + 1, **metrics})
 
@@ -325,6 +332,7 @@ def train_resnet(
         "n_classes": n_classes,
         "label_names": label_names,
         "best_val_acc": round(best_val_acc, 4),
+        "best_val_bal_acc": round(best_val_bal_acc, 4),
         "n_epochs": n_epochs,
         "history": history,
         "classification_report": report,

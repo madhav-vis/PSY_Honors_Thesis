@@ -15,6 +15,12 @@ from config import (
     FILTER_HIGH,
     FILTER_LOW,
     GEDAI_STRENGTH,
+    ICA_EOG_CHANNELS,
+    ICA_EOG_H_FREQ,
+    ICA_EOG_L_FREQ,
+    ICA_EOG_MEASURE,
+    ICA_EOG_THRESHOLD,
+    ICA_EOG_VIRTUAL,
     OUTPUT_DATA_DIR,
     OUTPUT_PLOT_DIR,
     REF_CHANNELS,
@@ -170,6 +176,69 @@ def _preprocess_pre_gedai(sj_num, cond):
         print("    Bad-channel detection: disabled (eeg.detect_bad_channels=false)")
 
     return raw, trial_data
+
+
+def _raw_with_virtual_eog(raw, eog_channels):
+    """Add VEOG = mean(frontal proxies) for more stable find_bads_eog."""
+    if len(eog_channels) < 2:
+        return raw, []
+    raw_det = raw.copy()
+    veog_data = raw_det.get_data(picks=eog_channels).mean(axis=0, keepdims=True)
+    veog_info = mne.create_info(["VEOG"], raw_det.info["sfreq"], ["eog"])
+    raw_det.add_channels(
+        [mne.io.RawArray(veog_data, veog_info)],
+        force_update_info=True,
+    )
+    return raw_det, ["VEOG"]
+
+
+def find_ica_eog_excludes(ica, raw):
+    """ICA components correlated with frontal/VEOG channels (configurable threshold)."""
+    eog_channels = [ch for ch in ICA_EOG_CHANNELS if ch in raw.ch_names]
+    if not eog_channels:
+        print("    ICA: no EOG proxy channels in cap — skipping automatic EOG detection")
+        return []
+
+    raw_det = raw
+    scan_channels = list(eog_channels)
+    if ICA_EOG_VIRTUAL:
+        try:
+            raw_det, virtual = _raw_with_virtual_eog(raw, eog_channels)
+            scan_channels.extend(virtual)
+        except Exception as exc:
+            print(f"    ICA: virtual VEOG skipped ({exc})")
+
+    print(
+        f"    ICA: find_bads_eog (measure={ICA_EOG_MEASURE}, "
+        f"threshold={ICA_EOG_THRESHOLD}, channels={scan_channels})"
+    )
+
+    eog_indices = []
+    hits_by_channel = {}
+    for eog_ch in scan_channels:
+        try:
+            inds, _ = ica.find_bads_eog(
+                raw_det,
+                ch_name=eog_ch,
+                threshold=ICA_EOG_THRESHOLD,
+                measure=ICA_EOG_MEASURE,
+                l_freq=ICA_EOG_L_FREQ,
+                h_freq=ICA_EOG_H_FREQ,
+                verbose=False,
+            )
+        except Exception as exc:
+            print(f"    ICA: find_bads_eog({eog_ch}) failed — {exc}")
+            continue
+        if inds:
+            inds = [int(i) for i in inds]
+            hits_by_channel[eog_ch] = inds
+            eog_indices.extend(inds)
+
+    eog_indices = sorted(set(eog_indices))
+    if hits_by_channel:
+        for ch, inds in hits_by_channel.items():
+            print(f"    ICA: EOG match via {ch} → component(s) {inds}")
+    return eog_indices
 
 
 def _postprocess_after_gedai(raw, trial_data, sj_num, cond):
@@ -354,27 +423,15 @@ def preprocess_eeg(sj_num, cond):
         else:
             print("    ICA: fit done — 0 components (unexpected)")
 
-        eog_channels = [ch for ch in ["Fp1", "Fp2", "AF3", "AF4"]
-                        if ch in raw.ch_names]
-        eog_indices = []
-        if eog_channels:
-            for eog_ch in eog_channels:
-                try:
-                    inds, _ = ica.find_bads_eog(raw, ch_name=eog_ch, verbose=False)
-                    eog_indices.extend(inds)
-                except Exception:
-                    pass
-            eog_indices = list(set(eog_indices))
-            if eog_indices:
-                print(f"    ICA: EOG-based candidates — "
-                      f"{len(eog_indices)} component(s): {sorted(eog_indices)}")
-                ica.exclude = eog_indices
-            else:
-                print("    ICA: find_bads_eog found no components to exclude")
+        eog_indices = find_ica_eog_excludes(ica, raw)
+        if eog_indices:
+            ica.exclude = eog_indices
+            print(f"    ICA: excluding {len(eog_indices)} component(s): {eog_indices}")
         else:
-            print("    ICA: no Fp1/Fp2/AF3/AF4 — skipping automatic EOG detection")
+            print("    ICA: find_bads_eog found no components to exclude")
+            ica.exclude = []
 
-        excluded = sorted(set(ica.exclude))
+        excluded = sorted(set(int(i) for i in ica.exclude))
         print(f"    ICA: ica.exclude = {excluded}")
 
         ica_fif = os.path.join(OUTPUT_DATA_DIR, f"sj{sj_num:02d}_{label}_ica.fif")

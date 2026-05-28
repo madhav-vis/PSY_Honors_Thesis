@@ -132,7 +132,8 @@ def main():
 
     try:
         from config import (
-            APPLY_ICA, DETECT_BAD_CHANNELS, RUN_DIR, RUN_DATE, RUN_NAME,
+            APPLY_ICA, DETECT_BAD_CHANNELS, ICA_EOG_THRESHOLD,
+            RUN_DIR, RUN_DATE, RUN_NAME,
             SFREQ_TARGET, FILTER_LOW, FILTER_HIGH, TARGET_CHANNELS,
             USE_GEDAI,
         )
@@ -146,6 +147,7 @@ def main():
         print(f"  Date:                 {RUN_DATE}")
         print(f"  Name:                 {RUN_NAME}")
         print(f"  apply_ica:            {APPLY_ICA}")
+        print(f"  ica_eog_threshold:    {ICA_EOG_THRESHOLD}")
         print(f"  use_gedai:            {USE_GEDAI}")
         print(f"  detect_bad_channels:  {DETECT_BAD_CHANNELS}")
         print(f"  sfreq:                {SFREQ_TARGET} Hz")

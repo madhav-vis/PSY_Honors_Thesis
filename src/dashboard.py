@@ -2471,12 +2471,15 @@ with tab_eval:
         # Relabel button
         if best_model:
             st.markdown("---")
-            st.markdown("#### Relabel All Crops with Best Model")
-            st.info(f"This will classify all gaze crops using "
-                    f"**{model_display.get(best_model, best_model)}** and "
-                    f"regenerate fusion features for the EEG pipeline.")
+            st.markdown("#### Relabel Unlabeled Crops with Best Model")
+            st.info(
+                f"Classifies only crops **without** a human label in "
+                f"`data/human_labels.csv` using "
+                f"**{model_display.get(best_model, best_model)}**. "
+                f"Human labels are preserved in the fusion CSVs."
+            )
 
-            if st.button("Relabel All Crops", type="secondary"):
+            if st.button("Relabel Unlabeled Crops", type="secondary"):
                 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
                 import evaluate as eval_mod
 
@@ -2487,18 +2490,24 @@ with tab_eval:
                     relabel_bar.progress(min(step / max(total, 1), 1.0))
                     relabel_status.text(f"{msg} ({step}/{total})")
 
-                with st.spinner("Relabeling crops..."):
+                with st.spinner("Relabeling unlabeled crops..."):
                     relabel_res = eval_mod.relabel_crops_with_best(
-                        best_model, progress_cb=_relabel_cb,
+                        best_model,
+                        progress_cb=_relabel_cb,
+                        only_unlabeled=True,
                     )
 
                 relabel_bar.progress(1.0)
                 if relabel_res.get("error"):
                     st.error(f"Relabeling failed: {relabel_res['error']}")
                 else:
-                    n_relabeled = relabel_res.get("n_crops_relabeled", 0)
-                    st.success(f"Relabeled {n_relabeled} crops. "
-                               f"Fusion CSV regenerated.")
+                    n_relabeled = relabel_res.get("total_relabeled", 0)
+                    n_skip = relabel_res.get("total_skipped_human_labeled", 0)
+                    st.success(
+                        f"Model classified {n_relabeled} crop(s)"
+                        + (f" ({n_skip} human-labeled skipped)." if n_skip else ".")
+                        + " Fusion CSVs regenerated."
+                    )
                     cats = relabel_res.get("category_counts", {})
                     if cats:
                         st.dataframe(

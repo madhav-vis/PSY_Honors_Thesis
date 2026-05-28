@@ -55,7 +55,6 @@ from vision import embeddings as emb_module
 _PROJECT_ROOT = os.path.dirname(_SRC_DIR)
 
 DEFAULT_RUN_ID = None
-SUBJECTS = [3]        # fallback only; overridden by run_config.yaml data.subjects
 CONDITIONS = None
 N_LABEL_SAMPLES = 100
 RUN_ANNOTATOR_FLAG = False
@@ -64,8 +63,10 @@ N_DEBUG_FRAMES = 10
 MAX_FIXATIONS = None
 N_CLUSTERS = 7
 
-# Shared trained classification head (run-independent).
+# Shared trained classification heads (run-independent).
 TRAINED_HEAD_PATH = os.path.join(_PROJECT_ROOT, "models", "clip_head.pt")
+RESNET_HEAD_PATH = os.path.join(_PROJECT_ROOT, "models", "resnet50.pt")
+_COMPARISON_JSON = os.path.join(_PROJECT_ROOT, "results", "vision_comparison.json")
 
 
 def _load_run_config(run_dir):
@@ -95,12 +96,50 @@ def _conditions_from_run_dir(run_dir):
 
 
 def _subjects_from_run_dir(run_dir):
-    """Read subject list from run config (fallback: global SUBJECTS constant)."""
+    """Read subject list from run config; fallback scans data/crops/ for available subjects."""
     cfg = _load_run_config(run_dir)
     sjs = cfg.get("data", {}).get("subjects", None)
     if sjs and isinstance(sjs, list) and all(isinstance(s, int) for s in sjs):
         return sorted(sjs)
-    return SUBJECTS
+    from vision.label_store import available_subjects_conditions
+    found = sorted({sj for sj, _ in available_subjects_conditions()})
+    if found:
+        return found
+    raise RuntimeError(
+        "No subjects found in run config or data/crops/. "
+        "Check run_config.yaml data.subjects or run the vision pipeline first."
+    )
+
+
+def _load_best_reclassifier(label_names):
+    """Return the best available classifier for reclassification, or None.
+
+    Priority:
+      1. results/vision_comparison.json best_model key (from evaluate.py)
+      2. ResNet if both model files exist (more expressive than linear CLIP head)
+      3. None — caller falls back to GazeClassifier with CLIP head
+    """
+    import json
+    best_name = None
+    if os.path.exists(_COMPARISON_JSON):
+        try:
+            with open(_COMPARISON_JSON) as f:
+                best_name = json.load(f).get("best_model")
+        except Exception:
+            pass
+
+    if best_name is None:
+        if os.path.exists(RESNET_HEAD_PATH) and os.path.exists(TRAINED_HEAD_PATH):
+            best_name = "resnet50"
+
+    if best_name == "resnet50" and os.path.exists(RESNET_HEAD_PATH):
+        try:
+            from vision.classifier import ResNetGazeClassifier
+            return ResNetGazeClassifier(RESNET_HEAD_PATH, label_names)
+        except Exception as e:
+            print(f"    Could not load ResNet reclassifier: {e} — falling back to CLIP head")
+
+    return None  # caller uses GazeClassifier with CLIP head
 
 
 def _world_video_dir_from_run_dir(run_dir):
@@ -368,13 +407,23 @@ def _process_condition(sj_num, condition, run_dir, classifier, world_video_dir=N
     if os.path.exists(human_csv):
         human_labels_df = pd.read_csv(human_csv)
 
-    # ── Load pre-existing CLIP head for reclassification ──
-    if not classifier.has_head and os.path.exists(TRAINED_HEAD_PATH):
-        classifier.load_head(TRAINED_HEAD_PATH)
-
-    if classifier.has_head:
-        print("  Reclassifying with trained head...")
+    # ── Reclassify with best available model (ResNet > CLIP head > skip) ──
+    _best = _load_best_reclassifier(list(CATEGORIES.keys()))
+    if _best is not None:
+        print("  Reclassifying with ResNet (best model)...")
+        batch_results = _best.classify_batch(crops_rgb)
+    elif classifier.has_head:
+        print("  Reclassifying with CLIP head...")
         batch_results = classifier.classify_batch(crops_rgb)
+    else:
+        if not classifier.has_head and os.path.exists(TRAINED_HEAD_PATH):
+            classifier.load_head(TRAINED_HEAD_PATH)
+            print("  Reclassifying with CLIP head...")
+            batch_results = classifier.classify_batch(crops_rgb)
+        else:
+            batch_results = None
+
+    if batch_results is not None:
         for i, res in enumerate(batch_results):
             results_df.loc[i, "gaze_target_category"] = res["label"]
             results_df.loc[i, "confidence"] = res["confidence"]

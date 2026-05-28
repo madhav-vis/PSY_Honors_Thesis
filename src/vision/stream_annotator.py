@@ -1,14 +1,14 @@
-"""Streamlit-based gaze crop annotation, training, and results tool.
+﻿"""Streamlit-based gaze crop annotation, training, and results tool.
 
 Run:  streamlit run src/vision/stream_annotator.py
 
 Six tabs:
-  1. Generate Crops  — crop status grid, data availability
-  2. Label           — annotation interface with labeler ID + flag support
-  3. Statistics      — per-class distributions, coverage, inter-rater agreement
-  4. Train           — CLIP linear head + ResNet-50, live metrics, model versioning
-  5. Evaluate        — test-set confusion matrices and model comparison
-  6. Results         — vision pipeline output visualizations (CLIP results, categories, clusters)
+  1. Generate Crops  ΓÇö crop status grid, data availability
+  2. Label           ΓÇö annotation interface with labeler ID + flag support
+  3. Statistics      ΓÇö per-class distributions, coverage, inter-rater agreement
+  4. Train           ΓÇö CLIP linear head + ResNet-50, live metrics, model versioning
+  5. Evaluate        ΓÇö test-set confusion matrices and model comparison
+  6. Results         ΓÇö vision pipeline output visualizations (CLIP results, categories, clusters)
 """
 
 import glob
@@ -73,7 +73,7 @@ from evaluate import (
 )
 
 LABEL_NAMES = list(CATEGORIES.keys())
-RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
+RUNS_ROOT = os.path.abspath(os.environ.get("PSY197B_RUNS_DIR") or os.path.join(PROJECT_ROOT, "runs"))
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 
 
@@ -145,14 +145,14 @@ def _run_subprocess_with_status(cmd, label, timeout_s=1800):
             st.error(f"Error running {label}: {e}")
     st.cache_data.clear()
 
-# ── Page config ───────────────────────────────────────────────
+# ΓöÇΓöÇ Page config ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 st.set_page_config(
     page_title="Gaze Crop Tool",
     layout="wide",
 )
 
-# ── Session state defaults ────────────────────────────────────
+# ΓöÇΓöÇ Session state defaults ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 _SS_DEFAULTS = {
     "labeler_id": "",
@@ -166,7 +166,7 @@ for _k, _v in _SS_DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-# ── Migration (run once per session) ─────────────────────────
+# ΓöÇΓöÇ Migration (run once per session) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 @st.cache_data(show_spinner=False)
 def _run_migration():
@@ -174,9 +174,9 @@ def _run_migration():
 
 migrated = _run_migration()
 if migrated > 0:
-    st.toast(f"Migrated {migrated} labels into central store.", icon="✅")
+    st.toast(f"Migrated {migrated} labels into central store.", icon="Γ£à")
 
-# ── Cached helpers ────────────────────────────────────────────
+# ΓöÇΓöÇ Cached helpers ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 @st.cache_data(ttl=30)
 def _load_all_labels():
@@ -190,7 +190,7 @@ def _load_trainable():
 
 @st.cache_data(ttl=60)
 def _find_all_embeddings() -> dict:
-    """Return dict: (sj_num, condition) → embeddings_base_path (most recent run)."""
+    """Return dict: (sj_num, condition) ΓåÆ embeddings_base_path (most recent run)."""
     result = {}
     if not os.path.isdir(RUNS_ROOT):
         return result
@@ -240,7 +240,7 @@ def _get_all_pairs_with_crops():
     return sorted((sj, cond, n) for (sj, cond), n in rows.items())
 
 
-# ── Results tab helpers ───────────────────────────────────────
+# ΓöÇΓöÇ Results tab helpers ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 
 @st.cache_data(ttl=30)
@@ -333,7 +333,7 @@ def _load_vision_comparison():
     return None
 
 
-# ── Sidebar ───────────────────────────────────────────────────
+# ΓöÇΓöÇ Sidebar ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 with st.sidebar:
     st.title("Gaze Crop Tool")
@@ -361,7 +361,7 @@ with st.sidebar:
     col_a.metric("Total labels", total_all)
     col_b.metric("Trainable", len(trainable_df))
     if len(flagged_df) > 0:
-        st.warning(f"⚑ {len(flagged_df)} flagged for review")
+        st.warning(f"ΓÜæ {len(flagged_df)} flagged for review")
 
     st.markdown("---")
     if st.button("Refresh data", use_container_width=True):
@@ -370,21 +370,21 @@ with st.sidebar:
 
     st.caption("`data/human_labels.csv`")
 
-# ── Main tabs ─────────────────────────────────────────────────
+# ΓöÇΓöÇ Main tabs ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 t_gen, t_label, t_stats, t_train, t_eval, t_deploy = st.tabs([
     "Generate Crops", "Label", "Statistics", "Train", "Evaluate", "Deploy"
 ])
 
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 1 — Generate Crops
-# ═══════════════════════════════════════════════════════════════
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# TAB 1 ΓÇö Generate Crops
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
 
 with t_gen:
     st.header("Crop Generation")
 
-    # ── Config editor ──
+    # ΓöÇΓöÇ Config editor ΓöÇΓöÇ
     _cfg_path = os.path.join(PROJECT_ROOT, "src", "run_config.yaml")
 
     with st.expander("Pipeline Config (run_config.yaml)", expanded=False):
@@ -410,7 +410,7 @@ with t_gen:
                 except yaml.YAMLError as _e:
                     st.error(f"Invalid YAML: {_e}")
 
-    # ── Status grid ──
+    # ΓöÇΓöÇ Status grid ΓöÇΓöÇ
     st.subheader("Status")
 
     try:
@@ -424,11 +424,11 @@ with t_gen:
         st.info(
             f"No `sjNN` subject folders found under:\n\n`{_scanned}`\n\n"
             "Check that `data.root` in `run_config.yaml` points to the folder "
-            "that directly contains `sj01/`, `sj02/`, … subdirectories."
+            "that directly contains `sj01/`, `sj02/`, ΓÇª subdirectories."
         )
     else:
         def _status_icon(val):
-            return "✅" if val else "❌"
+            return "Γ£à" if val else "Γ¥î"
 
         display_df = status_df.copy()
         display_df["has_video"] = display_df["has_video"].map(_status_icon)
@@ -450,7 +450,7 @@ with t_gen:
         st.markdown(f"**{total_crops}** total crops across all subjects.  "
                     f"**{labeled_total}** labeled ({labeled_total/max(total_crops,1)*100:.1f}%).")
 
-    # ── Generate controls ──
+    # ΓöÇΓöÇ Generate controls ΓöÇΓöÇ
     st.markdown("---")
     st.subheader("Generate Crops")
 
@@ -458,7 +458,7 @@ with t_gen:
         # Build selectable pairs: only those with video + fixations available
         _generable = status_df[status_df["has_video"] & status_df["has_fixations"]]
         _gen_options = [
-            f"sj{int(r['subject_id']):02d} — {r['condition']}  ({int(r['n_crops'])} crops)"
+            f"sj{int(r['subject_id']):02d} ΓÇö {r['condition']}  ({int(r['n_crops'])} crops)"
             for _, r in _generable.iterrows()
         ]
         _gen_selected = st.multiselect(
@@ -486,8 +486,8 @@ with t_gen:
             # Parse selected pairs back to (sj_num, condition)
             _pairs = []
             for sel in _gen_selected:
-                sj_str = sel.split(" — ")[0]
-                cond_str = sel.split(" — ")[1].split("  (")[0]
+                sj_str = sel.split(" ΓÇö ")[0]
+                cond_str = sel.split(" ΓÇö ")[1].split("  (")[0]
                 _pairs.append((int(sj_str[2:]), cond_str))
 
             with st.status(f"Generating crops for {len(_pairs)} pair(s)...", expanded=True) as _status:
@@ -496,12 +496,12 @@ with t_gen:
 
                 for _pi, (_sj, _cond) in enumerate(_pairs):
                     _pair_label = f"sj{_sj:02d}_{_cond}"
-                    _msg.markdown(f"**{_pair_label}** — starting...")
+                    _msg.markdown(f"**{_pair_label}** ΓÇö starting...")
 
                     def _crop_cb(phase, cur, tot, text, _pl=_pair_label, _idx=_pi, _total=len(_pairs)):
                         _overall = (_idx + cur / max(tot, 1)) / _total
                         _prog.progress(min(_overall, 1.0))
-                        _msg.markdown(f"**{_pl}** — {phase}: {text}")
+                        _msg.markdown(f"**{_pl}** ΓÇö {phase}: {text}")
 
                     try:
                         _dir, _n = generate_crops_for_condition(
@@ -510,7 +510,7 @@ with t_gen:
                             force=_force_regen,
                             progress_cb=_crop_cb,
                         )
-                        _msg.markdown(f"**{_pair_label}** — {_n} crops")
+                        _msg.markdown(f"**{_pair_label}** ΓÇö {_n} crops")
                     except Exception as _e:
                         st.error(f"Error generating crops for {_pair_label}: {_e}")
 
@@ -528,9 +528,9 @@ with t_gen:
     )
 
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 2 — Label
-# ═══════════════════════════════════════════════════════════════
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# TAB 2 ΓÇö Label
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
 
 with t_label:
     st.header("Annotate Gaze Crops")
@@ -547,7 +547,7 @@ with t_label:
         st.stop()
 
     pair_labels = [
-        f"sj{sj:02d}  {cond}  ({n} crops)" if n > 0 else f"sj{sj:02d}  {cond}  — no crops"
+        f"sj{sj:02d}  {cond}  ({n} crops)" if n > 0 else f"sj{sj:02d}  {cond}  ΓÇö no crops"
         for sj, cond, n in all_pairs
     ]
     selected_idx = st.selectbox(
@@ -652,7 +652,7 @@ with t_label:
         with col_img:
             if os.path.exists(img_path):
                 st.image(img_path, width=448,
-                         caption=f"sj{sj_num:02d} {condition} — fixation {fix_id}")
+                         caption=f"sj{sj_num:02d} {condition} ΓÇö fixation {fix_id}")
             else:
                 st.warning(f"Image not found: {img_path}")
 
@@ -677,8 +677,8 @@ with t_label:
                 st.session_state.crop_idx[pair_key] = idx + 1
                 st.rerun()
 
-            if col_flag.button("⚑ Flag / Ambiguous", use_container_width=True,
-                               help="Mark as ambiguous and move on — shown in review queue"):
+            if col_flag.button("ΓÜæ Flag / Ambiguous", use_container_width=True,
+                               help="Mark as ambiguous and move on ΓÇö shown in review queue"):
                 append_label(sj_num, condition, fix_id, ts_ns, fname,
                              FLAG_LABEL, labeler_id=labeler_id, is_flagged=True)
                 st.session_state.crop_idx[pair_key] = idx + 1
@@ -694,10 +694,10 @@ with t_label:
             st.cache_data.clear()
             st.rerun()
 
-    # ── Undo + review ───────────────────────────────────────────
+    # ΓöÇΓöÇ Undo + review ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     st.markdown("---")
     undo_col, _ = st.columns([1, 3])
-    if undo_col.button("↩ Undo last label"):
+    if undo_col.button("Γå⌐ Undo last label"):
         pair_key = (sj_num, condition, labeler_id)
         if remove_last_label(sj_num, condition, labeler_id=labeler_id):
             idx = st.session_state.crop_idx.get(pair_key, 1)
@@ -731,7 +731,7 @@ with t_label:
                 if os.path.exists(fpath):
                     with cols[i % 5]:
                         color = CATEGORY_COLORS.get(row["human_label"], "#888")
-                        flag_marker = " ⚑" if row.get("is_flagged") else ""
+                        flag_marker = " ΓÜæ" if row.get("is_flagged") else ""
                         st.image(fpath, width=120)
                         st.markdown(
                             f"<span style='color:{color}; font-weight:600'>"
@@ -740,9 +740,9 @@ with t_label:
                         )
 
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 3 — Statistics
-# ═══════════════════════════════════════════════════════════════
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# TAB 3 ΓÇö Statistics
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
 
 with t_stats:
     st.header("Label Statistics & Quality")
@@ -753,7 +753,7 @@ with t_stats:
     if trainable.empty:
         st.info("No trainable labels yet. Start labeling in the Label tab.")
     else:
-        # ── Class distribution ──────────────────────────────────
+        # ΓöÇΓöÇ Class distribution ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         st.subheader("Class distribution (trainable labels)")
 
         counts = (
@@ -778,8 +778,8 @@ with t_stats:
         except ImportError:
             st.bar_chart(counts.set_index("category")["count"])
 
-        # ── Per-subject/condition coverage ──────────────────────
-        st.subheader("Coverage per subject × condition")
+        # ΓöÇΓöÇ Per-subject/condition coverage ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        st.subheader("Coverage per subject ├ù condition")
 
         sj_cond = subject_condition_counts()
         if not sj_cond.empty:
@@ -792,7 +792,7 @@ with t_stats:
             except Exception:
                 st.dataframe(sj_cond, hide_index=True, use_container_width=True)
 
-        # ── Flagged crops ────────────────────────────────────────
+        # ΓöÇΓöÇ Flagged crops ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         st.subheader("Flagged / ambiguous crops")
 
         flagged = load_flagged()
@@ -809,7 +809,7 @@ with t_stats:
                 sub_flagged = flagged[
                     (flagged["subject_id"] == f_sj) & (flagged["condition"] == f_cond)
                 ]
-                with st.expander(f"sj{f_sj:02d} {f_cond} — {len(sub_flagged)} flagged"):
+                with st.expander(f"sj{f_sj:02d} {f_cond} ΓÇö {len(sub_flagged)} flagged"):
                     flag_cols = st.columns(5)
                     for i, (_, row) in enumerate(sub_flagged.head(20).iterrows()):
                         fpath = get_crop_path(f_sj, f_cond, row["filename"])
@@ -831,13 +831,13 @@ with t_stats:
                                         st.cache_data.clear()
                                         st.rerun()
 
-        # ── Inter-rater agreement ────────────────────────────────
+        # ΓöÇΓöÇ Inter-rater agreement ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         st.subheader("Inter-rater reliability")
 
         known_labelers = labeler_ids()
         if len(known_labelers) < 2:
             st.info(
-                "Need labels from ≥2 labelers with overlapping crops to compute agreement. "
+                "Need labels from ΓëÑ2 labelers with overlapping crops to compute agreement. "
                 "Make sure labelers annotate some of the same crops (different labelers can "
                 "label any crop since labeled_set is tracked per labeler ID)."
             )
@@ -867,8 +867,8 @@ with t_stats:
                         use_container_width=True,
                     )
                     st.caption(
-                        "κ < 0.4 = poor,  0.4–0.6 = moderate,  "
-                        "0.6–0.8 = substantial,  > 0.8 = near-perfect"
+                        "╬║ < 0.4 = poor,  0.4ΓÇô0.6 = moderate,  "
+                        "0.6ΓÇô0.8 = substantial,  > 0.8 = near-perfect"
                     )
 
                 with st.expander("View disagreements"):
@@ -878,20 +878,20 @@ with t_stats:
                     else:
                         st.dataframe(disagree, hide_index=True, use_container_width=True)
 
-        # ── Download ─────────────────────────────────────────────
+        # ΓöÇΓöÇ Download ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         st.markdown("---")
         if not all_labels_df.empty:
             st.download_button(
-                "⬇ Download all labels CSV",
+                "Γ¼ç Download all labels CSV",
                 all_labels_df.to_csv(index=False),
                 file_name="human_labels.csv",
                 mime="text/csv",
             )
 
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 4 — Train
-# ═══════════════════════════════════════════════════════════════
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# TAB 4 ΓÇö Train
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
 
 with t_train:
     st.header("Train Vision Models")
@@ -906,7 +906,7 @@ with t_train:
     else:
         st.markdown(f"**{len(trainable_for_train)}** trainable labels available.")
 
-        # ── Configuration ────────────────────────────────────────
+        # ΓöÇΓöÇ Configuration ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         cfg_col1, cfg_col2 = st.columns(2)
 
         with cfg_col1:
@@ -920,7 +920,7 @@ with t_train:
                 }[s],
                 help=(
                     "Within-subject: random train/val/test from same sessions. "
-                    "Cross-subject: hold out one subject entirely for test — "
+                    "Cross-subject: hold out one subject entirely for test ΓÇö "
                     "measures generalisation to unseen people."
                 ),
             )
@@ -928,7 +928,7 @@ with t_train:
             if split_strategy == "cross_subject":
                 all_sjs = sorted(trainable_for_train["subject_id"].unique())
                 if len(all_sjs) < 2:
-                    st.warning("Cross-subject split requires labels from ≥2 subjects.")
+                    st.warning("Cross-subject split requires labels from ΓëÑ2 subjects.")
                     split_strategy = "within_subject"
                 else:
                     test_sj = st.selectbox(
@@ -946,7 +946,7 @@ with t_train:
             train_resnet_flag = st.checkbox(
                 "ResNet-50 Fine-Tuned",
                 value=False,
-                help="Trains end-to-end on raw 224×224 crop PNGs. "
+                help="Trains end-to-end on raw 224├ù224 crop PNGs. "
                      "Slower but can outperform CLIP head with enough labels.",
             )
 
@@ -960,7 +960,7 @@ with t_train:
         st.markdown("---")
         os.makedirs(MODELS_DIR, exist_ok=True)
 
-        # ── CLIP Head Training ───────────────────────────────────
+        # ΓöÇΓöÇ CLIP Head Training ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         if train_clip_flag:
             st.subheader("CLIP Linear Head")
 
@@ -976,7 +976,7 @@ with t_train:
                         "Run directory", _avail_runs,
                         key="vision_pipeline_run_select",
                     )
-                    if st.button("▶ Run Vision Pipeline", type="primary",
+                    if st.button("Γû╢ Run Vision Pipeline", type="primary",
                                  key="btn_run_vision_pipeline"):
                         _run_dir = os.path.join(RUNS_ROOT, _vision_run)
                         _cmd = [VENV_PYTHON,
@@ -993,7 +993,7 @@ with t_train:
                     "Training will pool all labeled crops that have matching embeddings."
                 )
 
-                if st.button("▶ Train CLIP Head", type="primary", key="btn_train_clip"):
+                if st.button("Γû╢ Train CLIP Head", type="primary", key="btn_train_clip"):
                     from vision.train_head import train_with_holdout, save_head_versioned, save_head, _load_labeled_embeddings
                     import tempfile
 
@@ -1006,9 +1006,9 @@ with t_train:
                     def clip_cb(epoch, n_epochs, metrics):
                         progress_bar.progress(epoch / n_epochs)
                         status_text.markdown(
-                            f"Epoch **{epoch}/{n_epochs}** — "
-                            f"train loss: `{metrics['train_loss']}` — "
-                            f"val acc: `{metrics.get('val_acc', '—')}`"
+                            f"Epoch **{epoch}/{n_epochs}** ΓÇö "
+                            f"train loss: `{metrics['train_loss']}` ΓÇö "
+                            f"val acc: `{metrics.get('val_acc', 'ΓÇö')}`"
                         )
                         clip_history.append({"epoch": epoch, **metrics})
                         if len(clip_history) > 1:
@@ -1058,7 +1058,7 @@ with t_train:
                         y_pooled = np.array(y_all)
                         sj_arr = np.array(sj_ids_all)
 
-                        with st.spinner("Training…"):
+                        with st.spinner("TrainingΓÇª"):
                             model, stats, split = train_with_holdout(
                                 X_pooled, y_pooled, label_names,
                                 subject_ids=sj_arr if split_strategy == "cross_subject" else None,
@@ -1073,15 +1073,15 @@ with t_train:
                         progress_bar.progress(1.0)
                         status_text.empty()
                         st.success(
-                            f"✅ CLIP head trained — "
+                            f"Γ£à CLIP head trained ΓÇö "
                             f"val acc: **{stats['best_val_acc']:.1%}**  "
                             f"test acc: **{stats['test_acc']:.1%}**  "
-                            f"→ `{os.path.basename(save_path)}`"
+                            f"ΓåÆ `{os.path.basename(save_path)}`"
                         )
                         st.session_state.train_history_clip = clip_history
                         st.cache_data.clear()
 
-        # ── ResNet Training ──────────────────────────────────────
+        # ΓöÇΓöÇ ResNet Training ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         if train_resnet_flag:
             st.subheader("ResNet-50 Fine-Tuned")
 
@@ -1100,7 +1100,7 @@ with t_train:
                 if not crops_ok:
                     st.warning("No crop PNGs found in `data/crops/`. Generate crops first.")
                 else:
-                    if st.button("▶ Train ResNet-50", type="primary", key="btn_train_resnet"):
+                    if st.button("Γû╢ Train ResNet-50", type="primary", key="btn_train_resnet"):
                         from vision.resnet_head import train_from_label_store as train_rn
 
                         progress_bar_rn = st.progress(0.0)
@@ -1111,9 +1111,9 @@ with t_train:
                         def resnet_cb(epoch, n_epochs, metrics):
                             progress_bar_rn.progress(epoch / n_epochs)
                             status_text_rn.markdown(
-                                f"Epoch **{epoch}/{n_epochs}** — "
-                                f"train loss: `{metrics['train_loss']}` — "
-                                f"val loss: `{metrics['val_loss']}` — "
+                                f"Epoch **{epoch}/{n_epochs}** ΓÇö "
+                                f"train loss: `{metrics['train_loss']}` ΓÇö "
+                                f"val loss: `{metrics['val_loss']}` ΓÇö "
                                 f"val acc: `{metrics['val_acc']}`"
                             )
                             resnet_hist.append({"epoch": epoch, **metrics})
@@ -1126,7 +1126,7 @@ with t_train:
                         timestamp = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
                         rn_path = os.path.join(MODELS_DIR, f"resnet50_{timestamp}.pt")
 
-                        with st.spinner("Training ResNet-50 (this may take several minutes)…"):
+                        with st.spinner("Training ResNet-50 (this may take several minutes)ΓÇª"):
                             stats_rn = train_from_label_store_rn(
                                 out_path=rn_path,
                                 test_size=0.15,
@@ -1140,17 +1140,17 @@ with t_train:
                         status_text_rn.empty()
                         if stats_rn:
                             st.success(
-                                f"✅ ResNet-50 trained — "
+                                f"Γ£à ResNet-50 trained ΓÇö "
                                 f"best val acc: **{stats_rn['best_val_acc']:.1%}**  "
                                 f"test acc: **{stats_rn.get('test_acc', '?'):.1%}**  "
-                                f"→ `{os.path.basename(rn_path)}`"
+                                f"ΓåÆ `{os.path.basename(rn_path)}`"
                             )
                             st.session_state.train_history_resnet = resnet_hist
                         else:
-                            st.error("Training failed — not enough data or missing crops.")
+                            st.error("Training failed ΓÇö not enough data or missing crops.")
                         st.cache_data.clear()
 
-        # ── Saved models ─────────────────────────────────────────
+        # ΓöÇΓöÇ Saved models ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         st.markdown("---")
         st.subheader("Saved models")
 
@@ -1164,18 +1164,18 @@ with t_train:
                 rows.append({
                     "File": m["filename"],
                     "Type": m["model_type"],
-                    "Saved": m["saved_at"][:16] if m["saved_at"] else "—",
+                    "Saved": m["saved_at"][:16] if m["saved_at"] else "ΓÇö",
                     "N samples": m["n_samples"],
-                    "Val acc": f"{m['val_acc']:.3f}" if m["val_acc"] is not None else "—",
-                    "Test acc": f"{m['test_acc']:.3f}" if m["test_acc"] is not None else "—",
+                    "Val acc": f"{m['val_acc']:.3f}" if m["val_acc"] is not None else "ΓÇö",
+                    "Test acc": f"{m['test_acc']:.3f}" if m["test_acc"] is not None else "ΓÇö",
                     "Split": m["split_strategy"],
                 })
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 5 — Evaluate (3-way model comparison)
-# ═══════════════════════════════════════════════════════════════
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# TAB 5 ΓÇö Evaluate (3-way model comparison)
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
 
 with t_eval:
     st.header("Model Comparison")
@@ -1282,18 +1282,19 @@ with t_eval:
         )
 
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 6 — Deploy (Classify all crops with best model)
-# ═══════════════════════════════════════════════════════════════
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# TAB 6 ΓÇö Deploy (Classify all crops with best model)
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
 
 with t_deploy:
     st.header("Deploy Best Model")
     st.markdown(
-        "Classify **all** crops with the best vision model and generate "
-        "`vision_trial_features.csv` for the fusion pipeline."
+        "Classify **unlabeled** gaze crops with the selected model and merge "
+        "with existing `vision_results` + **human labels** (human labels are "
+        "never overwritten). Regenerates `vision_trial_features.csv` for fusion."
     )
 
-    # ── Evaluation summary ───────────────────────────────────
+    # ΓöÇΓöÇ Evaluation summary ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     _deploy_results = _load_vision_comparison()
     _model_display = {
         "clip_zeroshot": "Zero-shot CLIP",
@@ -1316,7 +1317,7 @@ with t_deploy:
             "**Evaluate** tab first, or select a model manually below."
         )
 
-    # ── Model selector ────────────────────────────────────────
+    # ΓöÇΓöÇ Model selector ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     _available_models = []
     if os.path.exists(os.path.join(MODELS_DIR, "resnet50.pt")) or \
        any(f.startswith("resnet") and f.endswith(".pt")
@@ -1340,7 +1341,7 @@ with t_deploy:
             horizontal=True,
         )
 
-        # ── Crop inventory ───────────────────────────────────
+        # ΓöÇΓöÇ Crop inventory ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         st.markdown("---")
         st.subheader("Crop Inventory")
 
@@ -1364,10 +1365,16 @@ with t_deploy:
                 use_container_width=True,
             )
             total_crops = sum(r["Crops"] for r in _crop_dirs)
-            st.markdown(f"**Total: {total_crops} crops** across "
-                        f"{len(_crop_dirs)} subject/condition pairs")
+            from vision.label_store import trainable_labeled_crop_keys
+            _labeled_keys = trainable_labeled_crop_keys()
+            _n_human = len(_labeled_keys)
+            st.markdown(
+                f"**Total: {total_crops} crops** across "
+                f"{len(_crop_dirs)} subject/condition pairs · "
+                f"**{_n_human}** human-labeled (skipped when box below is on)"
+            )
 
-            # ── Check existing output ────────────────────────
+            # ΓöÇΓöÇ Check existing output ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             _existing_features = []
             if os.path.isdir(VISION_FEATURES_DIR):
                 _existing_features = [
@@ -1380,8 +1387,22 @@ with t_deploy:
                     f"in `data/vision_features/`."
                 )
 
-            # ── Deploy button ─────────────────────────────────
+            # ── Deploy button ─────────────────────────────────────────────
             st.markdown("---")
+            _n_hand = len(load_trainable_labels())
+            if _n_hand > 0:
+                st.info(
+                    f"**{_n_hand} hand-labeled crops** are stored in "
+                    f"`data/human_labels.csv` and will **not** be overwritten "
+                    f"— the model only classifies unlabeled crops."
+                )
+            only_unlabeled = st.checkbox(
+                "Only classify crops without a human label",
+                value=True,
+                help="Skips rows in data/human_labels.csv (trainable labels). "
+                     "For long runs, CLI is slightly faster: "
+                     "python src/evaluate.py --deploy --deploy-model clip_head",
+            )
             if st.button("Deploy Model", type="primary"):
                 os.makedirs(VISION_FEATURES_DIR, exist_ok=True)
 
@@ -1395,7 +1416,7 @@ with t_deploy:
                     )
 
                 with st.spinner(
-                    f"Classifying all crops with "
+                    f"Classifying unlabeled crops with "
                     f"{_model_display.get(deploy_model, deploy_model)}..."
                 ):
                     deploy_result = relabel_crops_with_best(
@@ -1403,15 +1424,20 @@ with t_deploy:
                         run_name=None,
                         progress_cb=_deploy_cb,
                         output_dir=VISION_FEATURES_DIR,
+                        only_unlabeled=only_unlabeled,
                     )
 
                 progress_bar.progress(1.0)
                 status_text.empty()
 
                 if deploy_result and "error" not in deploy_result:
+                    skipped = deploy_result.get("total_skipped_human_labeled", 0)
                     st.success(
-                        f"Done! Classified **{deploy_result['total_relabeled']}** "
-                        f"crops. Features written to `data/vision_features/`."
+                        f"Done! Model classified **{deploy_result['total_relabeled']}** "
+                        f"new crop(s)"
+                        + (f" (skipped **{skipped}** human-labeled)."
+                           if skipped else ".")
+                        + " Features written to `data/vision_features/`."
                     )
                     if deploy_result.get("conditions"):
                         rows = []
@@ -1419,7 +1445,9 @@ with t_deploy:
                             rows.append({
                                 "Subject": f"sj{cs['sj_num']:02d}",
                                 "Condition": cs["condition"],
-                                "Crops": cs["n_crops"],
+                                "In results CSV": cs["n_crops"],
+                                "New (model)": cs.get("n_model_classified", 0),
+                                "Human": cs.get("n_human_labeled", 0),
                             })
                         st.dataframe(
                             pd.DataFrame(rows), hide_index=True,

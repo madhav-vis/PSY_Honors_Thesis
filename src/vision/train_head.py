@@ -31,6 +31,7 @@ if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
 from vision.config import CATEGORIES, LABEL_MERGE_MAP
+from vision.class_balance import make_classification_loss
 from vision.label_store import load_trainable_labels, load_labels_for, PROJECT_ROOT
 
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
@@ -210,11 +211,9 @@ def train_head(
     X_t = torch.from_numpy(X).to(device)
     y_t = torch.from_numpy(y_arr).long().to(device)
 
-    class_counts = np.bincount(y_arr, minlength=n_classes).astype(np.float32)
-    class_counts = np.maximum(class_counts, 1.0)
-    weights = 1.0 / class_counts
-    weights = weights / weights.sum() * n_classes
-    loss_fn = nn.CrossEntropyLoss(weight=torch.from_numpy(weights).to(device))
+    loss_fn = make_classification_loss(
+        y_arr, n_classes, use_sampler=False, loss_type="ce", max_boost=6.0
+    ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
@@ -289,11 +288,9 @@ def _cross_val_report(X, y_arr, label_names, n_classes, device,
         y_tr = torch.from_numpy(y_arr[train_idx]).long().to(device)
         X_val = torch.from_numpy(X[val_idx]).to(device)
 
-        class_counts = np.bincount(y_arr[train_idx], minlength=n_classes).astype(np.float32)
-        class_counts = np.maximum(class_counts, 1.0)
-        weights = 1.0 / class_counts
-        weights = weights / weights.sum() * n_classes
-        loss_fn = nn.CrossEntropyLoss(weight=torch.from_numpy(weights).to(device))
+        loss_fn = make_classification_loss(
+            y_arr[train_idx], n_classes, use_sampler=False, loss_type="ce", max_boost=6.0
+        ).to(device)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr,
                                        weight_decay=weight_decay)
@@ -377,11 +374,9 @@ def train_with_holdout(
     X_val_t = torch.from_numpy(X_val).to(device)
     y_val_t = torch.from_numpy(y_val).long().to(device)
 
-    class_counts = np.bincount(y_train, minlength=n_classes).astype(np.float32)
-    class_counts = np.maximum(class_counts, 1.0)
-    weights = 1.0 / class_counts
-    weights = weights / weights.sum() * n_classes
-    loss_fn = nn.CrossEntropyLoss(weight=torch.from_numpy(weights).to(device))
+    loss_fn = make_classification_loss(
+        y_train, n_classes, use_sampler=False, loss_type="ce", max_boost=6.0
+    ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
@@ -657,15 +652,41 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Train CLIP linear head")
-    parser.add_argument("--labels", required=True, help="Path to human_labels.csv")
-    parser.add_argument("--embeddings", required=True,
-                        help="Path to embeddings .npy (without extension)")
-    parser.add_argument("--output", required=True, help="Path for output .pt model file")
+    parser.add_argument(
+        "--from-store", action="store_true",
+        help="Train from data/human_labels.csv + runs/*/vision embeddings "
+             "(same as train_models.py). Ignores --labels/--embeddings.",
+    )
+    parser.add_argument("--labels", help="Path to human_labels.csv")
+    parser.add_argument(
+        "--embeddings",
+        help="Path to embeddings .npy prefix (without extension)",
+    )
+    parser.add_argument(
+        "--output", default=os.path.join(MODELS_DIR, "clip_head.pt"),
+        help="Path for output .pt model file",
+    )
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--strategy", default="within_subject",
                         choices=["within_subject", "cross_subject"])
     args = parser.parse_args()
+
+    if args.from_store:
+        from vision.train_models import train_clip_head
+
+        path = train_clip_head(
+            strategy=args.strategy,
+            n_epochs=args.epochs,
+            lr=args.lr,
+        )
+        raise SystemExit(0 if path else 1)
+
+    if not args.labels or not args.embeddings:
+        parser.error(
+            "Provide --labels and --embeddings, or use --from-store. "
+            "To train both CLIP + ResNet: python src/vision/train_models.py"
+        )
 
     X, y, label_names = _load_labeled_embeddings(
         args.labels, f"{args.embeddings}.npy", f"{args.embeddings}_ids.csv"
