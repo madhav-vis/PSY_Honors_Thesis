@@ -1,7 +1,7 @@
-"""Progress file protocol for subprocess → Streamlit communication.
+"""Progress file protocol for subprocess communication.
 
-Pipeline subprocesses write JSON progress updates; the Streamlit dashboard
-polls and renders them as progress bars.
+Pipeline subprocesses write JSON progress updates that can be polled
+and rendered as progress bars.
 """
 
 import json

@@ -83,7 +83,7 @@ nogo:
   gaze_hidden_dim: 64
   fusion_dropout: 0.3
 
-clip_categories:
+gaze_categories:
   - "sky"
   - "water"
   - "people"

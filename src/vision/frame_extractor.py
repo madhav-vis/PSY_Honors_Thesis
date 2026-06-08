@@ -48,7 +48,7 @@ def extract_frames_at_timestamps(video_path, gaze_df_or_path,
     """Extract video frames closest to the requested timestamps.
 
     Downsampling to 640x480 reduces file size ~8x and may improve
-    CLIP embedding quality by reducing fisheye distortion prominence.
+    classification quality by reducing fisheye distortion prominence.
 
     Parameters
     ----------

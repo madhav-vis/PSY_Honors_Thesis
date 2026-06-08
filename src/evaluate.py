@@ -3,8 +3,8 @@ PSY197B — Unified Evaluation Pipeline
 ======================================
 Thesis-ready comparison tables and confusion matrix heatmaps.
 
-Vision:  Zero-shot CLIP vs trained CLIP head vs fine-tuned ResNet-50
-EEG:     Leave-One-Subject-Out (LOSO) — EEGNet vs MultimodalNet
+Vision:  Fine-tuned ResNet-50 evaluation
+EEG:     Leave-One-Subject-Out (LOSO) — EEGNet vs RawGazeFusionNet
 
 Usage:
     python src/evaluate.py                    # full evaluation
@@ -12,7 +12,6 @@ Usage:
     python src/evaluate.py --eeg-only         # EEG LOSO only
     python src/evaluate.py --n-repeats 3      # fewer CV repeats (faster)
 
-Or from the Streamlit dashboard Evaluation tab.
 """
 
 import argparse
@@ -67,41 +66,10 @@ def _make_train_loss(y, n_classes, *, use_sampler: bool = False):
 #  DATA LOADING
 # ═══════════════════════════════════════════════════════════
 
-def _find_embeddings(run_name=None):
-    """Find CLIP embedding files from a run's vision output."""
-    if run_name:
-        search_dirs = [os.path.join(RUNS_ROOT, run_name, "vision")]
-    else:
-        runs = sorted(
-            [d for d in os.listdir(RUNS_ROOT)
-             if os.path.isdir(os.path.join(RUNS_ROOT, d))],
-            reverse=True,
-        )
-        search_dirs = [os.path.join(RUNS_ROOT, r, "vision") for r in runs]
-
-    for vdir in search_dirs:
-        if not os.path.isdir(vdir):
-            continue
-        for subdir in sorted(os.listdir(vdir)):
-            emb_npy = None
-            emb_ids = None
-            full = os.path.join(vdir, subdir)
-            if not os.path.isdir(full):
-                continue
-            for f in os.listdir(full):
-                if f.endswith("_embeddings.npy"):
-                    emb_npy = os.path.join(full, f)
-                elif f.endswith("_embeddings_ids.csv"):
-                    emb_ids = os.path.join(full, f)
-            if emb_npy and emb_ids:
-                return emb_npy, emb_ids
-    return None, None
-
-
 def load_vision_data():
-    """Load labeled vision data: CLIP embeddings + crop paths + labels.
+    """Load labeled vision data: crop paths + labels for ResNet evaluation.
 
-    Returns dict with keys: X_clip, y, crop_records, label_names, label_dist
+    Returns dict with keys: y, crop_records, label_names, label_dist
     or None if insufficient data.
     """
     from vision.label_store import load_trainable_labels, get_crop_path
@@ -127,46 +95,6 @@ def load_vision_data():
         flag = " (WARNING: <5)" if count < 5 else ""
         print(f"    {name:15s} {count:5d}{flag}")
 
-    emb_npy, emb_ids = _find_embeddings()
-    X_clip = None
-    if emb_npy and emb_ids:
-        embs = np.load(emb_npy)
-        ids_df = pd.read_csv(emb_ids)
-        fid_to_idx = {int(fid): i for i, fid in
-                      enumerate(ids_df["fixation_id"].values)}
-        matched_emb = []
-        matched_mask = []
-        for _, row in labels_df.iterrows():
-            fid = int(row["fixation_id"])
-            if fid in fid_to_idx:
-                matched_emb.append(embs[fid_to_idx[fid]])
-                matched_mask.append(True)
-            else:
-                matched_mask.append(False)
-        matched_mask = np.array(matched_mask)
-        if sum(matched_mask) >= 20:
-            X_clip = np.stack(matched_emb).astype(np.float32)
-            y = y[matched_mask]
-            labels_df = labels_df[matched_mask].reset_index(drop=True)
-            print(f"  CLIP embeddings matched: {len(X_clip)}/{sum(matched_mask)}")
-        else:
-            print(f"  Only {sum(matched_mask)} embedding matches — trying crops/cache…")
-            X_clip = None
-    else:
-        X_clip = None
-
-    if X_clip is None:
-        print("  No precomputed embeddings in runs/ — encoding from data/crops/ …")
-        from vision.train_models import encode_clip_from_crops
-
-        X_clip, y, _sj, label_names, labels_df = encode_clip_from_crops(
-            labels_df, batch_size=64, use_cache=True,
-        )
-        if X_clip is not None:
-            print(f"  CLIP embeddings ready: {len(X_clip)} samples (cache or fresh encode)")
-        else:
-            print("  CLIP head eval will be skipped")
-
     crop_records = []
     for _, row in labels_df.iterrows():
         crop_records.append({
@@ -177,7 +105,6 @@ def load_vision_data():
         })
 
     return {
-        "X_clip": X_clip,
         "y": y,
         "crop_records": crop_records,
         "label_names": label_names,
@@ -228,90 +155,6 @@ def _eval_metrics(y_true, y_pred, n_classes, label_names):
         "per_class": report,
         "confusion_matrix": cm.tolist(),
     }
-
-
-def _eval_clip_zeroshot(test_records, label_names, test_y):
-    """Run zero-shot CLIP on test crops."""
-    from vision.classifier import GazeClassifier
-    from vision.label_store import get_crop_path
-    import cv2
-
-    classifier = GazeClassifier()
-    label_to_idx = {n: i for i, n in enumerate(label_names)}
-
-    crops_rgb = []
-    for rec in test_records:
-        path = get_crop_path(rec["sj_num"], rec["condition"], rec["filename"])
-        img = cv2.imread(path)
-        if img is None:
-            crops_rgb.append(np.zeros((224, 224, 3), dtype=np.uint8))
-        else:
-            crops_rgb.append(img[:, :, ::-1].copy())
-
-    results = classifier.classify_batch(crops_rgb, batch_size=64)
-    preds = np.array([label_to_idx.get(r["label"], 0) for r in results])
-
-    del classifier
-    gc.collect()
-    if torch.backends.mps.is_available():
-        torch.mps.empty_cache()
-
-    return preds
-
-
-def _eval_clip_head(X_clip, y, train_idx, val_idx, test_idx, n_classes,
-                    n_epochs=200, lr=0.01):
-    """Train CLIP linear head and evaluate on test set."""
-    from vision.train_head import LinearHead
-
-    device = _get_eval_device()
-    X_tr = torch.from_numpy(X_clip[train_idx]).to(device)
-    y_tr = torch.from_numpy(y[train_idx]).long().to(device)
-    X_val = torch.from_numpy(X_clip[val_idx]).to(device)
-    y_val = torch.from_numpy(y[val_idx]).long().to(device)
-
-    loss_fn = _make_train_loss(y[train_idx], n_classes, use_sampler=False).to(device)
-
-    model = LinearHead(n_classes).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-3)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, n_epochs)
-
-    best_val_acc = 0.0
-    best_state = None
-
-    model.train()
-    for epoch in range(n_epochs):
-        optimizer.zero_grad()
-        logits = model(X_tr)
-        loss = loss_fn(logits, y_tr)
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-
-        if (epoch + 1) % 10 == 0:
-            model.eval()
-            with torch.no_grad():
-                val_acc = (model(X_val).argmax(1) == y_val).float().mean().item()
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                best_state = {k: v.cpu().clone()
-                              for k, v in model.state_dict().items()}
-            model.train()
-
-    if best_state:
-        model.load_state_dict(best_state)
-    model.eval()
-
-    X_te = torch.from_numpy(X_clip[test_idx]).to(device)
-    with torch.no_grad():
-        preds = model(X_te).argmax(1).cpu().numpy()
-
-    del model, X_tr, y_tr, X_val, y_val, X_te
-    gc.collect()
-    if torch.backends.mps.is_available():
-        torch.mps.empty_cache()
-
-    return preds
 
 
 def _eval_resnet(crop_records, y, train_idx, val_idx, test_idx,
@@ -384,7 +227,7 @@ def evaluate_vision_models(
     n_repeats=5, seed=42, progress_cb=None,
     resnet_epochs=30, resnet_batch_size=64,
 ):
-    """Compare zero-shot CLIP, trained CLIP head, and ResNet-50.
+    """Evaluate ResNet-50 gaze crop classifier.
 
     Returns dict with per-model results, comparison table data, and
     confusion matrices.
@@ -405,19 +248,15 @@ def evaluate_vision_models(
     y = data["y"]
     n_classes = len(data["label_names"])
     label_names = data["label_names"]
-    X_clip = data["X_clip"]
     crop_records = data["crop_records"]
-    has_clip_emb = X_clip is not None
 
     model_results = {
-        "clip_zeroshot": [],
-        "clip_head": [],
         "resnet50": [],
     }
     aggregate_cms = {name: np.zeros((n_classes, n_classes), dtype=int)
                      for name in model_results}
 
-    total_steps = n_repeats * (3 if has_clip_emb else 2)
+    total_steps = n_repeats
     step = 0
 
     for rep in range(n_repeats):
@@ -432,33 +271,6 @@ def evaluate_vision_models(
             continue
 
         test_y = y[test_idx]
-        test_records = [crop_records[i] for i in test_idx]
-
-        # Zero-shot CLIP
-        if progress_cb:
-            step += 1
-            progress_cb(step, total_steps, "Zero-shot CLIP")
-        print("    Zero-shot CLIP...")
-        zs_preds = _eval_clip_zeroshot(test_records, label_names, test_y)
-        zs_metrics = _eval_metrics(test_y, zs_preds, n_classes, label_names)
-        model_results["clip_zeroshot"].append(zs_metrics)
-        aggregate_cms["clip_zeroshot"] += np.array(zs_metrics["confusion_matrix"])
-        print(f"      macro F1={zs_metrics['macro_f1']:.3f}  "
-              f"acc={zs_metrics['accuracy']:.3f}")
-
-        # CLIP head
-        if has_clip_emb:
-            if progress_cb:
-                step += 1
-                progress_cb(step, total_steps, "CLIP head")
-            print("    CLIP head...")
-            ch_preds = _eval_clip_head(X_clip, y, train_idx, val_idx,
-                                       test_idx, n_classes)
-            ch_metrics = _eval_metrics(test_y, ch_preds, n_classes, label_names)
-            model_results["clip_head"].append(ch_metrics)
-            aggregate_cms["clip_head"] += np.array(ch_metrics["confusion_matrix"])
-            print(f"      macro F1={ch_metrics['macro_f1']:.3f}  "
-                  f"acc={ch_metrics['accuracy']:.3f}")
 
         # ResNet-50
         if progress_cb:
@@ -618,12 +430,12 @@ def _load_loso_multimodal(run_dirs, walk_only=True):
 
 
 def evaluate_eeg_loso(run_dirs=None, progress_cb=None):
-    """LOSO cross-validation: EEGNet vs MultimodalNet.
+    """LOSO cross-validation: EEGNet vs RawGazeFusionNet.
 
     Returns dict with per-fold and summary results.
     """
     from train import (
-        EEGNet, MultimodalNet, _eegnet_kwargs, _training_kwargs,
+        EEGNet, RawGazeFusionNet, _eegnet_kwargs, _training_kwargs,
         load_model_config, _loso_train_eval, _normalize_cross_subject,
     )
 
@@ -693,19 +505,19 @@ def evaluate_eeg_loso(run_dirs=None, progress_cb=None):
             print(f"      bal_acc={r_eeg['balanced_accuracy']:.3f}  "
                   f"AUC={r_eeg['auc_roc']:.3f}  F1={r_eeg['f1']:.3f}")
 
-        # Model B: MultimodalNet (EEG+ET)
+        # Model B: RawGazeFusionNet (EEG+ET)
         if has_et:
             if progress_cb:
                 step += 1
                 progress_cb(step, total_steps,
-                            f"MultimodalNet — held out sj{held_out}")
-            print(f"    MultimodalNet (EEG+ET)...")
+                            f"RawGazeFusionNet — held out sj{held_out}")
+            print(f"    RawGazeFusionNet (EEG+ET)...")
             X_et_tr = X_et[train_mask].copy()
             X_et_te = X_et[test_mask].copy()
             X_et_tr, X_et_te = _normalize_cross_subject(X_et_tr, X_et_te)
 
             r_mm = _loso_train_eval(
-                lambda: MultimodalNet(n_ch, n_et_ch, n_t, 2, **ekw),
+                lambda: RawGazeFusionNet(n_ch, n_et_ch, n_t, 2, **ekw),
                 X_eeg_tr, y_tr, X_eeg_te, y_te,
                 X_gaze_train=X_et_tr, X_gaze_test=X_et_te,
                 is_fusion=True, **tkw,
@@ -823,7 +635,7 @@ def relabel_crops_with_best(best_model_name, run_name=None,
     """Classify gaze crops with the best vision model and regenerate fusion features.
 
     Args:
-        best_model_name: "clip_head" or "resnet50"
+        best_model_name: "resnet50"
         run_name: target run directory (default: latest). Ignored if
             output_dir is provided.
         output_dir: standalone output directory for results and features.
@@ -858,14 +670,7 @@ def relabel_crops_with_best(best_model_name, run_name=None,
         run_path = os.path.join(RUNS_ROOT, run_name)
         vision_root = os.path.join(run_path, "vision")
 
-    if best_model_name == "clip_head":
-        from vision.classifier import GazeClassifier
-        head_path = os.path.join(PROJECT_ROOT, "models", "clip_head.pt")
-        if not os.path.exists(head_path):
-            return {"error": "no_clip_head_checkpoint"}
-        classifier = GazeClassifier(head_path=head_path)
-        use_resnet = False
-    elif best_model_name == "resnet50":
+    if best_model_name == "resnet50":
         from vision.resnet_head import load_resnet, _get_transforms
         resnet_path = os.path.join(PROJECT_ROOT, "models", "resnet50_best.pt")
         if not os.path.exists(resnet_path):
@@ -1233,8 +1038,6 @@ def _save_vision_plots(result):
     summary = result["summary"]
 
     model_titles = {
-        "clip_zeroshot": "Zero-shot CLIP",
-        "clip_head": "Trained CLIP Head",
         "resnet50": "Fine-tuned ResNet-50",
     }
 
@@ -1316,7 +1119,7 @@ def _save_eeg_plots(result):
 
     model_titles = {
         "eeg_only": "EEGNet (EEG-only)",
-        "multimodal": "MultimodalNet (EEG+ET)",
+        "multimodal": "RawGazeFusionNet (EEG+ET)",
     }
 
     for model_name, s in summary.items():
@@ -1399,12 +1202,10 @@ def generate_vision_table(result):
     """Generate vision comparison table as (LaTeX string, DataFrame)."""
     summary = result["summary"]
     model_names = {
-        "clip_zeroshot": "Zero-shot CLIP (ViT-B/32)",
-        "clip_head": "Trained CLIP Head",
         "resnet50": "Fine-tuned ResNet-50",
     }
     rows = []
-    for key in ["clip_zeroshot", "clip_head", "resnet50"]:
+    for key in ["resnet50"]:
         s = summary.get(key)
         if not s:
             continue
@@ -1455,7 +1256,7 @@ def generate_eeg_table(result):
     summary = result["summary"]
     model_names = {
         "eeg_only": "EEGNet (EEG-only)",
-        "multimodal": "MultimodalNet (EEG+ET)",
+        "multimodal": "RawGazeFusionNet (EEG+ET)",
     }
     rows = []
     for key in ["eeg_only", "multimodal"]:
@@ -1604,9 +1405,9 @@ def main():
         help="Deploy model on unlabeled crops → data/vision_features/",
     )
     parser.add_argument(
-        "--deploy-model", choices=["clip_head", "resnet50"],
-        default="clip_head",
-        help="Model for --deploy (default: clip_head)",
+        "--deploy-model", choices=["resnet50"],
+        default="resnet50",
+        help="Model for --deploy (default: resnet50)",
     )
     parser.add_argument(
         "--deploy-output-dir", default=None,

@@ -1,7 +1,7 @@
 """Fine-tune ResNet-50 on raw gaze crop images.
 
 Trains end-to-end on 224×224 PNG crops read directly from stable storage.
-Requires raw pixels — does NOT use CLIP embeddings.
+Requires raw pixels (224x224 PNG crops).
 
 Usage:
     from vision.resnet_head import train_from_label_store

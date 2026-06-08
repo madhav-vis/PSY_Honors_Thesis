@@ -10,8 +10,7 @@ Approach
 --------
 1. ResNet: WeightedRandomSampler (balanced minibatches) + *unweighted* CE,
    or mild sqrt-frequency weights with a cap on rare-class boost.
-2. CLIP head: sqrt-frequency CE (no aggressive focal on full-batch training).
-3. Checkpointing: pick best epoch by *balanced* validation accuracy.
+2. Checkpointing: pick best epoch by *balanced* validation accuracy.
 """
 
 from __future__ import annotations

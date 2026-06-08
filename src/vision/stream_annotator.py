@@ -3,12 +3,12 @@
 Run:  streamlit run src/vision/stream_annotator.py
 
 Six tabs:
-  1. Generate Crops  ΓÇö crop status grid, data availability
-  2. Label           ΓÇö annotation interface with labeler ID + flag support
-  3. Statistics      ΓÇö per-class distributions, coverage, inter-rater agreement
-  4. Train           ΓÇö CLIP linear head + ResNet-50, live metrics, model versioning
-  5. Evaluate        ΓÇö test-set confusion matrices and model comparison
-  6. Results         ΓÇö vision pipeline output visualizations (CLIP results, categories, clusters)
+  1. Generate Crops  — crop status grid, data availability
+  2. Label           — annotation interface with labeler ID + flag support
+  3. Statistics      — per-class distributions, coverage, inter-rater agreement
+  4. Train           — ResNet-50 fine-tuning, live metrics, model versioning
+  5. Evaluate        — test-set confusion matrices and model comparison
+  6. Deploy          — classify all crops with best model
 """
 
 import glob
@@ -29,7 +29,6 @@ if _mp.current_process().name != "MainProcess":
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 import yaml
 
@@ -158,7 +157,6 @@ _SS_DEFAULTS = {
     "labeler_id": "",
     "crop_idx": {},
     "last_pair": None,
-    "train_history_clip": [],
     "train_history_resnet": [],
     "train_running": False,
 }
@@ -186,32 +184,6 @@ def _load_all_labels():
 @st.cache_data(ttl=30)
 def _load_trainable():
     return load_trainable_labels()
-
-
-@st.cache_data(ttl=60)
-def _find_all_embeddings() -> dict:
-    """Return dict: (sj_num, condition) ΓåÆ embeddings_base_path (most recent run)."""
-    result = {}
-    if not os.path.isdir(RUNS_ROOT):
-        return result
-    for run_name in sorted(os.listdir(RUNS_ROOT), reverse=True):
-        vision_dir = os.path.join(RUNS_ROOT, run_name, "vision")
-        if not os.path.isdir(vision_dir):
-            continue
-        for sj_cond in sorted(os.listdir(vision_dir)):
-            parts = sj_cond.split("_", 1)
-            if len(parts) != 2 or not parts[0].startswith("sj"):
-                continue
-            try:
-                sj_num = int(parts[0][2:])
-            except ValueError:
-                continue
-            cond = parts[1]
-            base = os.path.join(vision_dir, sj_cond, f"{sj_cond}_embeddings")
-            if os.path.exists(f"{base}.npy") and os.path.exists(f"{base}_ids.csv"):
-                if (sj_num, cond) not in result:
-                    result[(sj_num, cond)] = base
-    return result
 
 
 @st.cache_data(ttl=20)
@@ -941,149 +913,16 @@ with t_train:
                 test_sj = None
 
         with cfg_col2:
-            st.subheader("Models to Train")
-            train_clip_flag = st.checkbox("CLIP + Linear Head", value=True)
-            train_resnet_flag = st.checkbox(
-                "ResNet-50 Fine-Tuned",
-                value=False,
-                help="Trains end-to-end on raw 224├ù224 crop PNGs. "
-                     "Slower but can outperform CLIP head with enough labels.",
-            )
+            st.subheader("Model Settings")
 
-            if train_clip_flag:
-                clip_epochs = st.slider("CLIP head epochs", 100, 500, 200, 50)
-
-            if train_resnet_flag:
-                resnet_epochs = st.slider("ResNet epochs", 10, 60, 30, 5)
-                resnet_batch = st.selectbox("Batch size", [16, 32, 64], index=1)
+            resnet_epochs = st.slider("ResNet epochs", 10, 60, 30, 5)
+            resnet_batch = st.selectbox("Batch size", [16, 32, 64], index=1)
 
         st.markdown("---")
         os.makedirs(MODELS_DIR, exist_ok=True)
 
-        # ΓöÇΓöÇ CLIP Head Training ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-        if train_clip_flag:
-            st.subheader("CLIP Linear Head")
-
-            emb_lookup = _find_all_embeddings()
-            if not emb_lookup:
-                st.warning(
-                    "No CLIP embeddings found. Run the vision pipeline to "
-                    "extract embeddings into `runs/`."
-                )
-                _avail_runs = _list_runs()
-                if _avail_runs:
-                    _vision_run = st.selectbox(
-                        "Run directory", _avail_runs,
-                        key="vision_pipeline_run_select",
-                    )
-                    if st.button("Γû╢ Run Vision Pipeline", type="primary",
-                                 key="btn_run_vision_pipeline"):
-                        _run_dir = os.path.join(RUNS_ROOT, _vision_run)
-                        _cmd = [VENV_PYTHON,
-                                os.path.join(PROJECT_ROOT, "src", "vision", "vision_main.py"),
-                                "--run-dir", _run_dir]
-                        _run_subprocess_with_status(_cmd, "Vision pipeline")
-                        st.rerun()
-                else:
-                    st.info("No runs found. Run the EEG/ET pipeline first.")
-            else:
-                n_emb_pairs = len(emb_lookup)
-                st.info(
-                    f"Embeddings available for {n_emb_pairs} subject/condition pair(s). "
-                    "Training will pool all labeled crops that have matching embeddings."
-                )
-
-                if st.button("Γû╢ Train CLIP Head", type="primary", key="btn_train_clip"):
-                    from vision.train_head import train_with_holdout, save_head_versioned, save_head, _load_labeled_embeddings
-                    import tempfile
-
-                    progress_bar = st.progress(0.0)
-                    status_text = st.empty()
-                    chart_placeholder = st.empty()
-
-                    clip_history = []
-
-                    def clip_cb(epoch, n_epochs, metrics):
-                        progress_bar.progress(epoch / n_epochs)
-                        status_text.markdown(
-                            f"Epoch **{epoch}/{n_epochs}** ΓÇö "
-                            f"train loss: `{metrics['train_loss']}` ΓÇö "
-                            f"val acc: `{metrics.get('val_acc', 'ΓÇö')}`"
-                        )
-                        clip_history.append({"epoch": epoch, **metrics})
-                        if len(clip_history) > 1:
-                            hist_df = pd.DataFrame(clip_history).set_index("epoch")
-                            chart_placeholder.line_chart(hist_df)
-
-                    # Pool embeddings from all available pairs
-                    X_all, y_all, sj_ids_all, fn_all = [], [], [], []
-                    label_names = list(CATEGORIES.keys())
-                    label_to_idx = {n: i for i, n in enumerate(label_names)}
-
-                    for (sj, cond), emb_base in emb_lookup.items():
-                        try:
-                            subset = trainable_for_train[
-                                (trainable_for_train["subject_id"] == sj)
-                                & (trainable_for_train["condition"] == cond)
-                            ]
-                            if subset.empty:
-                                continue
-                            with tempfile.NamedTemporaryFile(
-                                mode="w", suffix=".csv", delete=False
-                            ) as tmp:
-                                tmp_path = tmp.name
-                                subset[["fixation_id", "human_label"]].to_csv(tmp_path, index=False)
-                            X_sub, y_sub, _ = _load_labeled_embeddings(
-                                tmp_path,
-                                f"{emb_base}.npy",
-                                f"{emb_base}_ids.csv",
-                            )
-                            os.unlink(tmp_path)
-                            X_all.append(X_sub)
-                            y_all.extend(y_sub)
-                            sj_ids_all.extend([sj] * len(X_sub))
-                            fnames_sub = subset[
-                                subset["fixation_id"].isin(
-                                    pd.read_csv(f"{emb_base}_ids.csv")["fixation_id"].astype(int).values
-                                )
-                            ]["filename"].tolist()
-                            fn_all.extend(fnames_sub[:len(X_sub)])
-                        except Exception as exc:
-                            st.warning(f"Skipping sj{sj:02d} {cond}: {exc}")
-
-                    if not X_all:
-                        st.error("No embeddings matched any labels. Run the vision pipeline to extract embeddings.")
-                    else:
-                        X_pooled = np.vstack(X_all)
-                        y_pooled = np.array(y_all)
-                        sj_arr = np.array(sj_ids_all)
-
-                        with st.spinner("TrainingΓÇª"):
-                            model, stats, split = train_with_holdout(
-                                X_pooled, y_pooled, label_names,
-                                subject_ids=sj_arr if split_strategy == "cross_subject" else None,
-                                strategy=split_strategy,
-                                test_subject=test_sj,
-                                n_epochs=clip_epochs,
-                                progress_cb=clip_cb,
-                            )
-
-                        save_path = save_head_versioned(model, stats, MODELS_DIR, prefix="clip_head")
-                        save_head(model, stats, os.path.join(MODELS_DIR, "clip_head.pt"))
-                        progress_bar.progress(1.0)
-                        status_text.empty()
-                        st.success(
-                            f"Γ£à CLIP head trained ΓÇö "
-                            f"val acc: **{stats['best_val_acc']:.1%}**  "
-                            f"test acc: **{stats['test_acc']:.1%}**  "
-                            f"ΓåÆ `{os.path.basename(save_path)}`"
-                        )
-                        st.session_state.train_history_clip = clip_history
-                        st.cache_data.clear()
-
-        # ΓöÇΓöÇ ResNet Training ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-        if train_resnet_flag:
-            st.subheader("ResNet-50 Fine-Tuned")
+        # ── ResNet Training ──────────────────────────────────────────
+        st.subheader("ResNet-50 Fine-Tuned")
 
             try:
                 from torchvision import models as _tv
@@ -1150,38 +989,33 @@ with t_train:
                             st.error("Training failed ΓÇö not enough data or missing crops.")
                         st.cache_data.clear()
 
-        # ΓöÇΓöÇ Saved models ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # ── Saved models ─────────────────────────────────────────────
         st.markdown("---")
         st.subheader("Saved models")
 
-        from vision.train_head import list_saved_models
-        saved = list_saved_models(MODELS_DIR)
-        if not saved:
+        _pt_files = sorted(
+            f for f in os.listdir(MODELS_DIR)
+            if f.endswith(".pt") and os.path.isfile(os.path.join(MODELS_DIR, f))
+        ) if os.path.isdir(MODELS_DIR) else []
+        if not _pt_files:
             st.info("No saved models yet.")
         else:
             rows = []
-            for m in saved:
-                rows.append({
-                    "File": m["filename"],
-                    "Type": m["model_type"],
-                    "Saved": m["saved_at"][:16] if m["saved_at"] else "ΓÇö",
-                    "N samples": m["n_samples"],
-                    "Val acc": f"{m['val_acc']:.3f}" if m["val_acc"] is not None else "ΓÇö",
-                    "Test acc": f"{m['test_acc']:.3f}" if m["test_acc"] is not None else "ΓÇö",
-                    "Split": m["split_strategy"],
-                })
+            for f in _pt_files:
+                fp = os.path.join(MODELS_DIR, f)
+                size_mb = os.path.getsize(fp) / 1e6
+                rows.append({"File": f, "Size (MB)": f"{size_mb:.1f}"})
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
 # ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
-# TAB 5 ΓÇö Evaluate (3-way model comparison)
+# TAB 5 — Evaluate (ResNet-50 evaluation)
 # ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
 
 with t_eval:
-    st.header("Model Comparison")
+    st.header("Model Evaluation")
     st.markdown(
-        "Compare **CLIP zero-shot**, **CLIP linear head**, and **ResNet-50** "
-        "on your labeled crops using repeated stratified splits."
+        "Evaluate **ResNet-50** on your labeled crops using repeated stratified splits."
     )
 
     _prev_results = _load_vision_comparison()
@@ -1195,8 +1029,6 @@ with t_eval:
         if best:
             best_f1 = _prev_results["summary"][best]["macro_f1_mean"]
             _model_display = {
-                "clip_zeroshot": "Zero-shot CLIP",
-                "clip_head": "CLIP Linear Head",
                 "resnet50": "ResNet-50",
             }
             st.success(
@@ -1209,8 +1041,6 @@ with t_eval:
             matplotlib.use("Agg")
 
             _cm_models = {
-                "clip_zeroshot": "Zero-shot CLIP",
-                "clip_head": "CLIP Linear Head",
                 "resnet50": "ResNet-50",
             }
             label_names = _prev_results.get("label_names", LABEL_NAMES)
@@ -1257,8 +1087,6 @@ with t_eval:
             if best:
                 best_f1 = result["summary"][best]["macro_f1_mean"]
                 _model_display = {
-                    "clip_zeroshot": "Zero-shot CLIP",
-                    "clip_head": "CLIP Linear Head",
                     "resnet50": "ResNet-50",
                 }
                 st.success(
@@ -1277,8 +1105,7 @@ with t_eval:
     if not _prev_results:
         st.info(
             "No previous results found. Click **Run Comparison** above to "
-            "evaluate CLIP zero-shot vs CLIP head vs ResNet-50 on your "
-            "labeled crops."
+            "evaluate ResNet-50 on your labeled crops."
         )
 
 
@@ -1296,50 +1123,33 @@ with t_deploy:
 
     # ΓöÇΓöÇ Evaluation summary ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     _deploy_results = _load_vision_comparison()
-    _model_display = {
-        "clip_zeroshot": "Zero-shot CLIP",
-        "clip_head": "CLIP Linear Head",
-        "resnet50": "ResNet-50",
-    }
 
     if _deploy_results and "summary" in _deploy_results:
         best = _deploy_results["summary"].get("best_model")
         if best:
             best_f1 = _deploy_results["summary"][best]["macro_f1_mean"]
             st.success(
-                f"Evaluation winner: **{_model_display.get(best, best)}** "
-                f"(macro F1 = {best_f1:.3f})"
+                f"Evaluation: ResNet-50 macro F1 = {best_f1:.3f}"
             )
     else:
-        best = None
-        st.warning(
-            "No evaluation results found. Run the comparison in the "
-            "**Evaluate** tab first, or select a model manually below."
+        st.info(
+            "No evaluation results yet. Run one in the **Evaluate** tab first, "
+            "or deploy directly below."
         )
 
-    # ΓöÇΓöÇ Model selector ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-    _available_models = []
-    if os.path.exists(os.path.join(MODELS_DIR, "resnet50.pt")) or \
-       any(f.startswith("resnet") and f.endswith(".pt")
-           for f in os.listdir(MODELS_DIR) if os.path.isfile(os.path.join(MODELS_DIR, f))):
-        _available_models.append("resnet50")
-    if os.path.exists(os.path.join(MODELS_DIR, "clip_head.pt")):
-        _available_models.append("clip_head")
+    # ── Model check ──────────────────────────────────────────────
+    _has_resnet = (
+        os.path.isdir(MODELS_DIR) and (
+            os.path.exists(os.path.join(MODELS_DIR, "resnet50.pt")) or
+            any(f.startswith("resnet") and f.endswith(".pt")
+                for f in os.listdir(MODELS_DIR) if os.path.isfile(os.path.join(MODELS_DIR, f)))
+        )
+    )
+    deploy_model = "resnet50"
 
-    if not _available_models:
-        st.error("No trained models found in `models/`. Train a model first.")
+    if not _has_resnet:
+        st.error("No ResNet-50 model found in `models/`. Train one first.")
     else:
-        _default_idx = 0
-        if best and best in _available_models:
-            _default_idx = _available_models.index(best)
-
-        deploy_model = st.radio(
-            "Model to deploy",
-            _available_models,
-            index=_default_idx,
-            format_func=lambda m: _model_display.get(m, m),
-            horizontal=True,
-        )
 
         # ΓöÇΓöÇ Crop inventory ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         st.markdown("---")
@@ -1401,7 +1211,7 @@ with t_deploy:
                 value=True,
                 help="Skips rows in data/human_labels.csv (trainable labels). "
                      "For long runs, CLI is slightly faster: "
-                     "python src/evaluate.py --deploy --deploy-model clip_head",
+                     "python src/evaluate.py --deploy --deploy-model resnet50",
             )
             if st.button("Deploy Model", type="primary"):
                 os.makedirs(VISION_FEATURES_DIR, exist_ok=True)
@@ -1415,10 +1225,7 @@ with t_deploy:
                         f"**{step}/{total}**: {message}"
                     )
 
-                with st.spinner(
-                    f"Classifying unlabeled crops with "
-                    f"{_model_display.get(deploy_model, deploy_model)}..."
-                ):
+                with st.spinner("Classifying unlabeled crops with ResNet-50..."):
                     deploy_result = relabel_crops_with_best(
                         deploy_model,
                         run_name=None,

@@ -32,7 +32,7 @@ eeg:
   tmax: 0.8
   baseline: [-0.2, 0]
 
-clip_categories:
+gaze_categories:
   - "sky"
   - "water"
   - "people"

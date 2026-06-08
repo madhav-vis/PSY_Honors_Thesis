@@ -13,7 +13,7 @@ def _load_vision_config() -> tuple[dict, list]:
 
     Returns:
         (et_folder_map, vision_conditions) where vision_conditions is the
-        subset of condition keys to use for crop generation / CLIP inference.
+        subset of condition keys to use for crop generation / classification.
         Falls back to all walk conditions if vision_conditions is absent.
     """
     _default_map = {
@@ -108,7 +108,6 @@ WORLD_VIDEO_CANDIDATES = {
 
 CROP_SIZE = 224
 MIN_FIXATION_MS = 80
-CLIP_MODEL = "ViT-B/32"
 
 
 def get_eye_dir(data_root, sj_num, condition_label):

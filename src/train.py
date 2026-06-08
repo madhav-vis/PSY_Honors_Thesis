@@ -432,7 +432,7 @@ class EEGNet(nn.Module):
 #  MULTIMODAL MODEL (Phase 3)
 # ═══════════════════════════════════════════════════════════
 
-class MultimodalNet(nn.Module):
+class RawGazeFusionNet(nn.Module):
     """Dual-branch: EEGNet for EEG + small CNN for ET, late fusion."""
 
     def __init__(self, n_eeg_ch, n_et_ch, n_times, n_classes,
@@ -772,7 +772,7 @@ def phase3(run_name, cfg=None):
     print(f"  EEG: {n_eeg_ch} ch × {n_times} t")
     print(f"  ET:  {n_et_ch} ch × {n_times} t")
 
-    model = MultimodalNet(n_eeg_ch, n_et_ch, n_times, n_classes, **ekw)
+    model = RawGazeFusionNet(n_eeg_ch, n_et_ch, n_times, n_classes, **ekw)
     _, res = train_dl_model(
         model,
         data_pooled["X_eeg_train"], data_pooled["X_eeg_val"],
@@ -793,7 +793,7 @@ def phase3(run_name, cfg=None):
         print(f"\n{'─' * 40}")
         print(f"  Condition: {cond}")
         print(f"{'─' * 40}")
-        model = MultimodalNet(n_eeg_ch, n_et_ch, n_times, n_classes, **ekw)
+        model = RawGazeFusionNet(n_eeg_ch, n_et_ch, n_times, n_classes, **ekw)
         _, res = train_dl_model(
             model,
             data["X_eeg_train"], data["X_eeg_val"],
@@ -937,7 +937,7 @@ def phase4(run_name, cfg=None):
             n_et_ch = X_et_tr.shape[1]
             n_times = X_eeg_tr.shape[2]
 
-            model = MultimodalNet(n_eeg_ch, n_et_ch, n_times, 2, **ekw)
+            model = RawGazeFusionNet(n_eeg_ch, n_et_ch, n_times, 2, **ekw)
             _, res = train_dl_model(
                 model, X_eeg_tr, X_eeg_va, y_tr, y_va,
                 X_et_train=X_et_tr, X_et_val=X_et_va,
@@ -1007,7 +1007,7 @@ def phase5(run_name):
 # ═══════════════════════════════════════════════════════════
 
 class GazeSequenceEncoder(nn.Module):
-    """Encodes CLIP fixation category sequences via LSTM or 1D CNN."""
+    """Encodes fixation category sequences via LSTM or 1D CNN."""
 
     def __init__(self, n_categories, embedding_dim=32, hidden_dim=64,
                  encoder_type="lstm", dropout=0.3):
@@ -1044,8 +1044,8 @@ class GazeSequenceEncoder(nn.Module):
 #  NO-GO FUSION MODEL (Phase 7)
 # ═══════════════════════════════════════════════════════════
 
-class NoGoFusionNet(nn.Module):
-    """EEGNet + GazeSequenceEncoder → late fusion for no-go CR vs FA."""
+class SemanticGazeFusionNet(nn.Module):
+    """EEGNet + GazeSequenceEncoder, late fusion for no-go CR vs FA."""
 
     def __init__(self, n_eeg_ch, n_times, n_categories,
                  gaze_embed_dim=32, gaze_hidden=64, gaze_type="lstm",
@@ -1085,7 +1085,7 @@ class NoGoFusionNet(nn.Module):
 #  NO-GO DATA UTILITIES
 # ═══════════════════════════════════════════════════════════
 
-CLIP_CATEGORIES = [
+GAZE_CATEGORIES = [
     "sky", "water", "people",
     "vegetation", "trail_ground", "other",
 ]
@@ -1148,8 +1148,8 @@ def _pool_and_filter_nogo(run_name):
             "n_cr": n_cr, "n_fa": n_fa, "conditions": conditions}
 
 
-def _load_clip_gaze_sequences(run_name, meta, conditions, pre_stim_ms=2000):
-    """Load CLIP fixation categories per trial from vision results."""
+def _load_gaze_sequences(run_name, meta, conditions, pre_stim_ms=2000):
+    """Load fixation categories per trial from vision results."""
     vision_root = os.path.join(RUNS_ROOT, run_name, "vision")
 
     # Also check other runs if current run has no vision data
@@ -1207,14 +1207,14 @@ def _load_clip_gaze_sequences(run_name, meta, conditions, pre_stim_ms=2000):
         sequences.append(cats)
 
     n_with = sum(1 for s in sequences if len(s) > 0)
-    print(f"  Gaze sequences: {n_with}/{len(sequences)} trials have CLIP data")
+    print(f"  Gaze sequences: {n_with}/{len(sequences)} trials have vision data")
     return sequences if n_with > 0 else None
 
 
 def _encode_gaze_onehot(sequences, categories=None, max_len=20):
     """One-hot encode fixation category sequences."""
     if categories is None:
-        categories = CLIP_CATEGORIES
+        categories = GAZE_CATEGORIES
     cat_to_idx = {c: i for i, c in enumerate(categories)}
     n_cats = len(categories)
     encoded = np.zeros((len(sequences), max_len, n_cats), dtype=np.float32)
@@ -1509,7 +1509,7 @@ def phase6(run_name, cfg=None):
 # ═══════════════════════════════════════════════════════════
 
 def phase7(run_name, phase6_results=None, cfg=None):
-    """Model B: EEGNet + CLIP gaze fusion on no-go trials."""
+    """Model B: EEGNet + semantic gaze fusion on no-go trials."""
     print("\n" + "=" * 60)
     print("  PHASE 7 — NO-GO INHIBITORY CONTROL (EEG + Gaze Fusion)")
     print("=" * 60)
@@ -1525,14 +1525,14 @@ def phase7(run_name, phase6_results=None, cfg=None):
 
     X, labels, meta = nogo["X_eeg"], nogo["labels"], nogo["meta"]
     n_ch, n_t = X.shape[1], X.shape[2]
-    n_cats = len(CLIP_CATEGORIES)
+    n_cats = len(GAZE_CATEGORIES)
 
-    gaze_seqs = _load_clip_gaze_sequences(run_name, meta, nogo["conditions"])
+    gaze_seqs = _load_gaze_sequences(run_name, meta, nogo["conditions"])
     if gaze_seqs is None:
-        print("\n  No CLIP gaze data available.")
+        print("\n  No vision gaze data available.")
         print("  Run the vision pipeline first, then re-run: "
               "python src/train.py --phase 7")
-        return {"skipped": True, "reason": "no_clip_data"}
+        return {"skipped": True, "reason": "no_vision_data"}
 
     X_gaze = _encode_gaze_onehot(gaze_seqs)
     print(f"  Gaze tensor: {X_gaze.shape}")
@@ -1544,7 +1544,7 @@ def phase7(run_name, phase6_results=None, cfg=None):
             p6_state = p6_folds[-1].get("_best_state")
 
     def factory():
-        m = NoGoFusionNet(n_ch, n_t, n_cats,
+        m = SemanticGazeFusionNet(n_ch, n_t, n_cats,
                           gaze_embed_dim=32, gaze_hidden=64,
                           gaze_type="lstm", fusion_dropout=0.3,
                           **ekw)
@@ -1970,7 +1970,7 @@ def phase9_gaze_walking(run_name, cfg=None):
     X_parts, label_parts, sid_parts, meta_parts = [], [], [], []
     gaze_parts = []
     has_gaze = True
-    n_cats = len(CLIP_CATEGORIES)
+    n_cats = len(GAZE_CATEGORIES)
 
     for sj, rn in run_dirs.items():
         conditions = discover_conditions(rn)
@@ -2037,9 +2037,9 @@ def phase9_gaze_walking(run_name, cfg=None):
             r["held_out"] = int(held_out)
             model_a_folds.append(r)
 
-    # Model B: NoGoFusionNet (if gaze data available)
+    # Model B: SemanticGazeFusionNet (if gaze data available)
     model_b_folds = []
-    gaze_seqs = _load_clip_gaze_sequences(
+    gaze_seqs = _load_gaze_sequences(
         list(run_dirs.values())[0], meta_f, [])
     if gaze_seqs is not None:
         X_gaze = _encode_gaze_onehot(gaze_seqs)
@@ -2048,7 +2048,7 @@ def phase9_gaze_walking(run_name, cfg=None):
             X_tr, X_te = X[tr], X[te]
             X_tr, X_te = _normalize_cross_subject(X_tr, X_te)
             r = _loso_train_eval(
-                lambda: NoGoFusionNet(n_ch, n_t, n_cats,
+                lambda: SemanticGazeFusionNet(n_ch, n_t, n_cats,
                                       gaze_embed_dim=32, gaze_hidden=64,
                                       gaze_type="lstm", fusion_dropout=0.3, **ekw),
                 X_tr, labels[tr], X_te, labels[te], **tkw,

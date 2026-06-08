@@ -127,25 +127,6 @@ def use_amp() -> bool:
     return use_cuda() and bool(_load_compute_settings().get("use_amp", True))
 
 
-def _running_under_streamlit() -> bool:
-    """True iff we appear to be running inside a Streamlit script.
-
-    Streamlit re-imports the entire script in each spawned multiprocessing
-    worker on Windows, which is incompatible with DataLoader workers > 0
-    (the worker boots, re-runs Streamlit setup, often crashes on missing
-    files or sidebar state). When detected we force num_workers=0.
-    """
-    if os.environ.get("STREAMLIT_SERVER_PORT"):
-        return True
-    if os.environ.get("STREAMLIT_RUNTIME") == "1":
-        return True
-    try:
-        import sys
-        return "streamlit" in sys.modules and "streamlit.runtime" in sys.modules
-    except Exception:
-        return False
-
-
 def _windows_commit_budget_workers(default_n: int) -> int:
     """Cap worker count so we don't blow Windows page-file commit charge.
 
@@ -173,15 +154,9 @@ def _windows_commit_budget_workers(default_n: int) -> int:
 def dataloader_workers() -> int:
     """Number of DataLoader worker processes from config (default 8).
 
-    Forced to 0 when running under Streamlit on any OS: Streamlit's
-    script-rerun model + Windows spawn re-imports the whole app script
-    inside each worker, which is fundamentally unsafe.
-
-    On Windows, also capped by available RAM (each spawn-worker re-imports
+    On Windows, capped by available RAM (each spawn-worker re-imports
     the full torch stack, ~2.5 GB committed memory per worker).
     """
-    if _running_under_streamlit():
-        return 0
     n = int(_load_compute_settings().get("dataloader_workers", 8))
     return _windows_commit_budget_workers(n)
 
