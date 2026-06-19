@@ -2,6 +2,8 @@
 
 UCSB Psychology Honors Thesis. Research pipeline for studying inhibitory control (Go/NoGo task) under movement (sit/walk) and attention (attend/unattend) conditions using mobile EEG and Pupil Labs eye tracking.
 
+**[Read the Full Thesis (PDF)](Madhav_Rao_Honors_Thesis_Final.pdf)**
+
 ## Pipeline
 
 ```
